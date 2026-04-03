@@ -1,0 +1,45 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer PosInBuf {
+    vec4 posIn[];
+};
+layout(set = 0, binding = 1) writeonly buffer PosOutBuf {
+    vec4 posOut[];
+};
+layout(set = 0, binding = 2) readonly buffer NeighIdxBuf {
+    uint neighIdx[];
+};
+layout(set = 0, binding = 3) readonly buffer NeighOffBuf {
+    uint neighOff[];
+};
+
+layout(push_constant) uniform Push {
+    uint vertexCount;
+    float lambda;
+} push;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.vertexCount) return;
+
+    uint start = neighOff[i];
+    uint end = neighOff[i + 1];
+    vec3 cur = posIn[i].xyz;
+
+    if (end <= start) {
+        posOut[i] = posIn[i];
+        return;
+    }
+
+    vec3 sum = vec3(0.0);
+    for (uint k = start; k < end; ++k) {
+        uint j = neighIdx[k];
+        sum += posIn[j].xyz;
+    }
+    float n = float(end - start);
+    vec3 avg = sum / n;
+    vec3 smoothed = mix(cur, avg, push.lambda);
+    posOut[i] = vec4(smoothed, posIn[i].w);
+}

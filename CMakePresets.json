@@ -1,0 +1,33 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vs2022",
+      "displayName": "VS 2022 generator (needs MSVC v143 toolset)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "ninja",
+      "displayName": "Ninja + cl (open x64 Native Tools for your VS first)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "displayName": "Release (VS solution)",
+      "configurePreset": "vs2022",
+      "configuration": "Release"
+    },
+    {
+      "name": "ninja-release",
+      "displayName": "Release (Ninja)",
+      "configurePreset": "ninja"
+    }
+  ]
+}
