@@ -512,7 +512,8 @@ bool VulkanRenderer::beginFrame() {
     return true;
 }
 
-void VulkanRenderer::recordMeshPass(const geometry::Mesh& mesh, const glm::mat4& model, const Camera& cam) {
+void VulkanRenderer::recordMeshPass(const geometry::Mesh& mesh, const glm::mat4& model, const Camera& cam,
+                                    const MeshDefectViewParams& defectView) {
     if (gpuMesh_.indexCount == 0) return;
 
     UboData u{};
@@ -521,6 +522,9 @@ void VulkanRenderer::recordMeshPass(const geometry::Mesh& mesh, const glm::mat4&
     u.proj = cam.projMatrix();
     u.proj[1][1] *= -1.f;
     u.cameraWorld = glm::vec4(cam.eyePosition(), 0.f);
+    u.defectScales =
+        glm::vec4(defectView.stressScale, defectView.velocityScale, defectView.loadScale, defectView.visualMode);
+    u.defectTime = glm::vec4(defectView.timeMix, 0.f, 0.f, 0.f);
     std::memcpy(uboMapped_, &u, sizeof(u));
 
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
@@ -566,10 +570,11 @@ void VulkanRenderer::uploadMesh(const geometry::Mesh& mesh, std::string& err) {
     VkDevice device = dev_.device();
     gpuMesh_.destroy(device);
 
+    constexpr size_t kVtxStride = 52;
     std::vector<uint8_t> vtx;
-    vtx.resize(mesh.positions.size() * 36);
+    vtx.resize(mesh.positions.size() * kVtxStride);
     for (size_t i = 0; i < mesh.positions.size(); ++i) {
-        float* p = reinterpret_cast<float*>(vtx.data() + i * 36);
+        float* p = reinterpret_cast<float*>(vtx.data() + i * kVtxStride);
         p[0] = mesh.positions[i].x;
         p[1] = mesh.positions[i].y;
         p[2] = mesh.positions[i].z;
@@ -578,10 +583,15 @@ void VulkanRenderer::uploadMesh(const geometry::Mesh& mesh, std::string& err) {
         p[4] = n.x;
         p[5] = n.y;
         p[6] = n.z;
-        float d = (i < mesh.defectHighlight.size()) ? mesh.defectHighlight[i] : 0.f;
-        p[7] = d;
+        glm::vec4 dh = i < mesh.defectHighlight.size() ? mesh.defectHighlight[i] : glm::vec4(0.f);
+        p[7] = dh.x;
+        p[8] = dh.y;
+        p[9] = dh.z;
+        p[10] = dh.w;
         float pk = (i < mesh.pickHighlight.size()) ? mesh.pickHighlight[i] : 0.f;
-        p[8] = pk;
+        p[11] = pk;
+        float pr = (i < mesh.weaknessPropagated.size()) ? mesh.weaknessPropagated[i] : 0.f;
+        p[12] = pr;
     }
 
     VkBufferCreateInfo vbci{};

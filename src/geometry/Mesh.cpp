@@ -16,11 +16,13 @@ void Mesh::clear() {
     normals.clear();
     indices.clear();
     defectHighlight.clear();
+    weaknessPropagated.clear();
     pickHighlight.clear();
 }
 
 void Mesh::ensureHighlightBuffer() {
-    defectHighlight.resize(positions.size(), 0.f);
+    defectHighlight.assign(positions.size(), glm::vec4(0.f));
+    weaknessPropagated.assign(positions.size(), 0.f);
 }
 
 void Mesh::ensurePickBuffer() {

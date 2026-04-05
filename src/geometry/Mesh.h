@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 namespace physisim::geometry {
 
@@ -13,9 +14,11 @@ struct Mesh {
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
     std::vector<uint32_t> indices;
-    /// Per-vertex weight in [0,1]: 0 = neutral, low = greener (stronger), high = redder (weaker / worse).
-    std::vector<float> defectHighlight;
-    /// Hover / selection cursor highlight [0,1], uploaded as 4th vertex channel (yellow emphasis in shader).
+    /// Per-vertex pack: (geo, stress proxy, velocity weight, load weight) in [0,1], averaged from incident triangles.
+    std::vector<glm::vec4> defectHighlight;
+    /// Neighbor-propagated weakness scalar [0,1] for temporal preview (5th vertex attribute).
+    std::vector<float> weaknessPropagated;
+    /// Hover / selection cursor highlight [0,1], uploaded as pick vertex channel (yellow emphasis in shader).
     std::vector<float> pickHighlight;
 
     void clear();

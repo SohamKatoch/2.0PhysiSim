@@ -15,6 +15,17 @@
 
 namespace physisim::rendering {
 
+/// Tunable weakness visualization (matches `mesh.frag` / UBO packing).
+struct MeshDefectViewParams {
+    float stressScale{1.f};
+    float velocityScale{1.f};
+    float loadScale{1.f};
+    /// 0 = weighted combined heat, 1 = RGB false-color (geo / stress / motion+load), 2 = multi-objective alignment.
+    float visualMode{0.f};
+    /// Blends local combined metric with mesh-connectivity propagated field.
+    float timeMix{0.f};
+};
+
 struct GpuMesh {
     VkBuffer vbo{VK_NULL_HANDLE};
     VkDeviceMemory vboMem{VK_NULL_HANDLE};
@@ -32,7 +43,8 @@ public:
     void resize(int width, int height);
 
     bool beginFrame();
-    void recordMeshPass(const geometry::Mesh& mesh, const glm::mat4& model, const Camera& cam);
+    void recordMeshPass(const geometry::Mesh& mesh, const glm::mat4& model, const Camera& cam,
+                        const MeshDefectViewParams& defectView = MeshDefectViewParams{});
     bool endFrame();
 
     void uploadMesh(const geometry::Mesh& mesh, std::string& err);
@@ -103,6 +115,10 @@ private:
         glm::mat4 view;
         glm::mat4 proj;
         glm::vec4 cameraWorld{};
+        /// xyz = stress / velocity / load scales; w = visualMode.
+        glm::vec4 defectScales{};
+        /// x = timeMix (propagated vs local); yzw unused.
+        glm::vec4 defectTime{};
     };
 };
 

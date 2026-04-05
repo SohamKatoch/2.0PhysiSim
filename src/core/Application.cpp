@@ -32,6 +32,8 @@
 #include "analysis/GeometryAnalyzer.h"
 #include "analysis/MeshBenchmark.h"
 #include "analysis/MeshHighlightMerge.h"
+#include "analysis/TriangleWeakness.h"
+#include "analysis/WeaknessField.h"
 #include "core/CommandSystem.h"
 #include "core/Scene.h"
 #include "fea/GpuLaplacianSmooth.h"
@@ -54,8 +56,13 @@ namespace physisim::core {
 namespace {
 
 struct InsightCache {
+    /// Per-triangle state after deterministic + stress merge (before kinematic scenario weights).
+    std::vector<analysis::TriangleWeakness> triScenarioSource;
+    /// AI-merged scalar severity (same ordering as mesh triangles).
     std::vector<float> triWeakness;
     std::vector<float> triStress;
+    std::vector<float> triPropagated;
+    std::vector<std::vector<uint32_t>> triNeighbors;
     nlohmann::json merged;
     std::unordered_map<uint64_t, uint8_t> edgeFaceCount;
     float meshUnitToMm{1.f};
@@ -91,9 +98,10 @@ static bool triangleHasBoundaryEdge(const InsightCache& c, const geometry::Mesh&
 }
 
 static const char* severityBandLabel(float weakness01) {
-    if (weakness01 < 0.28f) return "Low — green band";
-    if (weakness01 < 0.55f) return "Moderate — yellow band";
-    return "Elevated — red band";
+    if (weakness01 < 0.22f) return "Low (cool)";
+    if (weakness01 < 0.45f) return "Moderate";
+    if (weakness01 < 0.68f) return "Elevated";
+    return "Severe (hot)";
 }
 
 static std::string faceSuggestionText(const nlohmann::json& merged, float weakness01, float stress01) {
@@ -320,25 +328,56 @@ static void loadStlIntoScene(Scene& scene, const std::string& path, std::string&
     stlBufDisplay[stlBufDisplay.size() - 1] = '\0';
 }
 
-void applyTriangleHighlights(geometry::Mesh& mesh, const std::vector<uint32_t>& triangleIndices,
-                             const std::vector<float>& weakness01) {
+/// Packs multi-channel per-triangle weakness to vertices (vec4 + propagated scalar) for GPU heatmaps.
+void applyPerTriangleWeaknessPackToVertices(geometry::Mesh& mesh, const std::vector<analysis::TriangleWeakness>& triState,
+                                            const std::vector<float>& triPropagated01) {
     mesh.ensureHighlightBuffer();
-    std::fill(mesh.defectHighlight.begin(), mesh.defectHighlight.end(), 0.f);
-    for (size_t i = 0; i < triangleIndices.size(); ++i) {
-        uint32_t t = triangleIndices[i];
-        float w = 1.f;
-        if (!weakness01.empty()) {
-            w = (i < weakness01.size()) ? weakness01[i] : weakness01.back();
-            w = std::clamp(w, 0.f, 1.f);
-        }
-        size_t base = static_cast<size_t>(t) * 3;
-        if (base + 2 >= mesh.indices.size()) continue;
+    std::fill(mesh.defectHighlight.begin(), mesh.defectHighlight.end(), glm::vec4(0.f));
+    std::fill(mesh.weaknessPropagated.begin(), mesh.weaknessPropagated.end(), 0.f);
+    if (mesh.indices.empty() || triState.empty()) return;
+    const size_t triCount = mesh.indices.size() / 3;
+    if (triState.size() < triCount) return;
+    const bool haveProp = triPropagated01.size() >= triCount;
+    std::vector<glm::vec4> sum(mesh.positions.size(), glm::vec4(0.f));
+    std::vector<float> sumP(mesh.positions.size(), 0.f);
+    std::vector<uint32_t> count(mesh.positions.size(), 0u);
+    for (size_t t = 0; t < triCount; ++t) {
+        const analysis::TriangleWeakness& w = triState[t];
+        glm::vec4 pack(w.geoWeakness, w.stressProxy, w.velocityWeight, w.loadWeight);
+        pack = glm::clamp(pack, glm::vec4(0.f), glm::vec4(1.f));
+        float pv = haveProp ? std::clamp(triPropagated01[t], 0.f, 1.f) : 0.f;
+        const size_t b = t * 3;
         for (int k = 0; k < 3; ++k) {
-            uint32_t vi = mesh.indices[base + static_cast<size_t>(k)];
-            if (vi < mesh.defectHighlight.size())
-                mesh.defectHighlight[vi] = std::max(mesh.defectHighlight[vi], w);
+            uint32_t vi = mesh.indices[b + static_cast<size_t>(k)];
+            if (vi < sum.size()) {
+                sum[vi] += pack;
+                sumP[vi] += pv;
+                ++count[vi];
+            }
         }
     }
+    for (size_t vi = 0; vi < mesh.defectHighlight.size(); ++vi) {
+        if (count[vi] > 0) {
+            float inv = 1.f / static_cast<float>(count[vi]);
+            mesh.defectHighlight[vi] = sum[vi] * inv;
+            mesh.weaknessPropagated[vi] = sumP[vi] * inv;
+        }
+    }
+}
+
+void refreshWeaknessVisualization(geometry::Mesh& mesh, InsightCache& insight, float scenarioSpeed01,
+                                  float scenarioAccel01, float scenarioCorner01, float propagationFactor,
+                                  int propagationIters) {
+    if (!insight.valid || insight.triScenarioSource.empty()) return;
+    std::vector<analysis::TriangleWeakness> tri = insight.triScenarioSource;
+    analysis::applyKinematicWeaknessProxies(tri, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+    if (!insight.triNeighbors.empty() && insight.triWeakness.size() == insight.triScenarioSource.size()) {
+        analysis::propagateWeaknessIterations(insight.triWeakness, insight.triNeighbors, propagationFactor,
+                                              propagationIters, insight.triPropagated);
+    } else {
+        insight.triPropagated.assign(insight.triWeakness.size(), 0.f);
+    }
+    applyPerTriangleWeaknessPackToVertices(mesh, tri, insight.triPropagated);
 }
 
 struct WindowUserData {
@@ -488,6 +527,21 @@ int Application::run(int argc, char** argv) {
     }
 
     static float laplacianLambda = 0.25f;
+    static float weaknessStressScale = 1.f;
+    static float weaknessVelocityScale = 1.f;
+    static float weaknessLoadScale = 1.f;
+    static float weaknessTimeMix = 0.f;
+    static float weaknessVisualMode = 0.f;
+    static float scenarioSpeed01 = 0.f;
+    static float scenarioAccel01 = 0.f;
+    static float scenarioCorner01 = 0.f;
+    static float weaknessPropagationFactor = 0.88f;
+    static int weaknessPropagationIters = 6;
+    static float scenarioSpeedPrev = -1.f;
+    static float scenarioAccelPrev = -1.f;
+    static float scenarioCornerPrev = -1.f;
+    static float weaknessPropFactorPrev = -1.f;
+    static int weaknessPropItersPrev = -1;
     static float analysisMaterialDensityKgM3 = 7850.f;
     static bool enableMeshInsight = true;
     static uint32_t hoverTriIndex = UINT32_MAX;
@@ -729,17 +783,47 @@ int Application::run(int argc, char** argv) {
                 auto det = analysis::GeometryAnalyzer::analyze(*node->mesh);
                 std::vector<uint32_t> hi;
                 std::vector<float> hw;
-                analysis::buildMergedViewportHighlights(det, rep.triangleStressProxy, rep.merged, hi, hw);
-                applyTriangleHighlights(*node->mesh, hi, hw);
-                meshInsight.triWeakness = det.triWeaknessAll;
-                meshInsight.triStress = std::move(rep.triangleStressProxy);
+                std::vector<float> triMerged;
+                std::vector<analysis::TriangleWeakness> mergedState;
+                analysis::buildMergedViewportHighlights(det, rep.triangleStressProxy, rep.merged, hi, hw, &triMerged,
+                                                        &mergedState);
+                meshInsight.triScenarioSource = std::move(mergedState);
+                meshInsight.triWeakness = std::move(triMerged);
+                meshInsight.triStress.resize(meshInsight.triScenarioSource.size());
+                for (size_t ti = 0; ti < meshInsight.triStress.size(); ++ti)
+                    meshInsight.triStress[ti] = meshInsight.triScenarioSource[ti].stressProxy;
                 meshInsight.merged = rep.merged;
                 meshInsight.meshUnitToMm = meshUnitToMm_;
                 rendering::buildMeshEdgeFaceCounts(*node->mesh, meshInsight.edgeFaceCount);
+                analysis::buildTriangleNeighborGraph(*node->mesh, meshInsight.triNeighbors);
                 meshInsight.valid = !meshInsight.triWeakness.empty();
+                scenarioSpeedPrev = scenarioSpeed01;
+                scenarioAccelPrev = scenarioAccel01;
+                scenarioCornerPrev = scenarioCorner01;
+                weaknessPropFactorPrev = weaknessPropagationFactor;
+                weaknessPropItersPrev = weaknessPropagationIters;
+                refreshWeaknessVisualization(*node->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01,
+                                               weaknessPropagationFactor, weaknessPropagationIters);
                 meshDirty_ = true;
             }
         }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Defect heatmap (multi-channel)");
+        if (!meshInsight.valid) ImGui::BeginDisabled();
+        ImGui::SliderFloat("Stress scale##w", &weaknessStressScale, 0.f, 2.f, "%.2f");
+        ImGui::SliderFloat("Velocity scale##w", &weaknessVelocityScale, 0.f, 2.f, "%.2f");
+        ImGui::SliderFloat("Load scale##w", &weaknessLoadScale, 0.f, 2.f, "%.2f");
+        ImGui::SliderFloat("Time mix (propagated)##w", &weaknessTimeMix, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Visual mode##w", &weaknessVisualMode, 0.f, 2.f, "%.0f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("0 = combined heat, 1 = RGB (geo / stress / load), 2 = multi-objective alignment");
+        ImGui::TextUnformatted("Kinematic scenario (what-if, 0–1)");
+        ImGui::SliderFloat("Speed##w", &scenarioSpeed01, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Accel / brake##w", &scenarioAccel01, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Cornering##w", &scenarioCorner01, 0.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Propagation factor##w", &weaknessPropagationFactor, 0.f, 1.f, "%.2f");
+        ImGui::SliderInt("Propagation iterations##w", &weaknessPropagationIters, 0, 24);
+        if (!meshInsight.valid) ImGui::EndDisabled();
         ImGui::Separator();
         ImGui::TextUnformatted("Benchmark: original STL vs active mesh");
         ImGui::TextWrapped(
@@ -778,6 +862,26 @@ int Application::run(int argc, char** argv) {
         }
         ImGui::TextUnformatted(analysisText_.c_str());
         ImGui::End();
+
+        if (meshInsight.valid) {
+            bool geomChanged = std::abs(scenarioSpeed01 - scenarioSpeedPrev) > 1e-5f ||
+                               std::abs(scenarioAccel01 - scenarioAccelPrev) > 1e-5f ||
+                               std::abs(scenarioCorner01 - scenarioCornerPrev) > 1e-5f ||
+                               std::abs(weaknessPropagationFactor - weaknessPropFactorPrev) > 1e-5f ||
+                               weaknessPropagationIters != weaknessPropItersPrev;
+            if (geomChanged) {
+                scenarioSpeedPrev = scenarioSpeed01;
+                scenarioAccelPrev = scenarioAccel01;
+                scenarioCornerPrev = scenarioCorner01;
+                weaknessPropFactorPrev = weaknessPropagationFactor;
+                weaknessPropItersPrev = weaknessPropagationIters;
+                if (auto* node = scene.find(scene.activeModelId()); node && node->mesh) {
+                    refreshWeaknessVisualization(*node->mesh, meshInsight, scenarioSpeed01, scenarioAccel01,
+                                                 scenarioCorner01, weaknessPropagationFactor, weaknessPropagationIters);
+                    meshDirty_ = true;
+                }
+            }
+        }
 
         ImGui::SetNextWindowPos(ImVec2(14.f, ds.y - logBarH - 14.f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(std::max(400.f, ds.x - 28.f), logBarH), ImGuiCond_FirstUseEver);
@@ -846,13 +950,30 @@ int Application::run(int argc, char** argv) {
                                            : 0.f;
                     const float stress =
                         (meshInsight.valid && ht < meshInsight.triStress.size()) ? meshInsight.triStress[ht] : 0.f;
+                    float combDyn = weak;
+                    float velW = 0.f, loadW = 0.f, propTri = 0.f;
+                    glm::vec3 defectDir{};
+                    if (meshInsight.valid && ht < meshInsight.triScenarioSource.size()) {
+                        std::vector<analysis::TriangleWeakness> one = {meshInsight.triScenarioSource[ht]};
+                        analysis::applyKinematicWeaknessProxies(one, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                        combDyn = analysis::TriangleWeakness::combined(one[0], weaknessStressScale,
+                                                                       weaknessVelocityScale, weaknessLoadScale);
+                        velW = one[0].velocityWeight;
+                        loadW = one[0].loadWeight;
+                        defectDir = one[0].defectDirection;
+                        if (ht < meshInsight.triPropagated.size()) propTri = meshInsight.triPropagated[ht];
+                    }
                     const float thick = triangleMinEdgeMm(mesh, ht, meshUnitToMm_);
                     ImGui::BeginTooltip();
                     ImGui::Text("Mesh: %s", scene.activeModelId().c_str());
                     ImGui::Text("Face (triangle) ID: %u", ht);
                     ImGui::Separator();
-                    ImGui::Text("Severity band: %s", severityBandLabel(weak));
+                    ImGui::Text("Severity band (AI merge): %s", severityBandLabel(weak));
+                    ImGui::Text("Weighted combo (sliders + scenario): %.2f", static_cast<double>(combDyn));
                     ImGui::Text("Laplacian stress proxy: %.2f (0-1, geometry-only)", static_cast<double>(stress));
+                    ImGui::Text("Velocity / load weights: %.2f / %.2f", static_cast<double>(velW),
+                                static_cast<double>(loadW));
+                    ImGui::Text("Propagated weakness: %.2f", static_cast<double>(propTri));
                     ImGui::Text("Min edge (thickness proxy): %.2f mm", static_cast<double>(thick));
                     if (ImGui::GetIO().KeyCtrl) {
                         size_t triBase = static_cast<size_t>(ht) * 3;
@@ -870,6 +991,8 @@ int Application::run(int argc, char** argv) {
                                             static_cast<double>(fn.y), static_cast<double>(fn.z));
                             }
                         }
+                        ImGui::Text("Defect dir hint: %.2f %.2f %.2f", static_cast<double>(defectDir.x),
+                                    static_cast<double>(defectDir.y), static_cast<double>(defectDir.z));
                         ImGui::Text("Touches open boundary: %s",
                                     triangleHasBoundaryEdge(meshInsight, mesh, ht) ? "yes" : "no");
                     }
@@ -900,8 +1023,23 @@ int Application::run(int argc, char** argv) {
                 float st = (meshInsight.valid && selectedTriIndex < meshInsight.triStress.size())
                                ? meshInsight.triStress[selectedTriIndex]
                                : 0.f;
-                ImGui::Text("Severity band: %s", severityBandLabel(wk));
+                float combD = wk;
+                float vW = 0.f, lW = 0.f, pr = 0.f;
+                if (meshInsight.valid && selectedTriIndex < meshInsight.triScenarioSource.size()) {
+                    std::vector<analysis::TriangleWeakness> one = {meshInsight.triScenarioSource[selectedTriIndex]};
+                    analysis::applyKinematicWeaknessProxies(one, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                    combD = analysis::TriangleWeakness::combined(one[0], weaknessStressScale, weaknessVelocityScale,
+                                                                 weaknessLoadScale);
+                    vW = one[0].velocityWeight;
+                    lW = one[0].loadWeight;
+                    if (selectedTriIndex < meshInsight.triPropagated.size())
+                        pr = meshInsight.triPropagated[selectedTriIndex];
+                }
+                ImGui::Text("Severity band (AI merge): %s", severityBandLabel(wk));
+                ImGui::Text("Weighted combo: %.2f", static_cast<double>(combD));
                 ImGui::Text("Stress proxy: %.2f", static_cast<double>(st));
+                ImGui::Text("Velocity / load: %.2f / %.2f", static_cast<double>(vW), static_cast<double>(lW));
+                ImGui::Text("Propagated: %.2f", static_cast<double>(pr));
                 ImGui::Separator();
                 if (ImGui::Button("Apply AI suggestion (placeholder)"))
                     commandLog_ += "[insight] Apply suggestion: not automated — use geometry tools / export.\n";
@@ -961,7 +1099,15 @@ int Application::run(int argc, char** argv) {
         glm::mat4 model(1.f);
         auto* node = scene.find(scene.activeModelId());
         if (node) model = node->transform;
-        if (node && node->mesh) vk.recordMeshPass(*node->mesh, model, camera);
+        if (node && node->mesh) {
+            rendering::MeshDefectViewParams dv{};
+            dv.stressScale = weaknessStressScale;
+            dv.velocityScale = weaknessVelocityScale;
+            dv.loadScale = weaknessLoadScale;
+            dv.visualMode = weaknessVisualMode;
+            dv.timeMix = weaknessTimeMix;
+            vk.recordMeshPass(*node->mesh, model, camera, dv);
+        }
         imgui.render(vk.commandBuffer());
         vk.endFrame();
     }

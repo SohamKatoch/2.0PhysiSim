@@ -25,14 +25,22 @@ std::string lower(std::string s) {
 
 void buildMergedViewportHighlights(const GeometryAnalysisResult& geo, const std::vector<float>& triangleStressProxy,
                                    const nlohmann::json& mergedReport, std::vector<uint32_t>& outTriangleIndices,
-                                   std::vector<float>& outWeakness01) {
+                                   std::vector<float>& outWeakness01, std::vector<float>* outPerTriangleMerged,
+                                   std::vector<TriangleWeakness>* outTriangleState) {
     outTriangleIndices.clear();
     outWeakness01.clear();
+    if (outPerTriangleMerged) outPerTriangleMerged->clear();
+    if (outTriangleState) outTriangleState->clear();
 
     const auto& base = geo.triWeaknessAll;
     if (base.empty()) return;
 
-    std::vector<float> merged(base.begin(), base.end());
+    std::vector<TriangleWeakness> state = base;
+    std::vector<float> merged(state.size());
+    for (size_t t = 0; t < state.size(); ++t) {
+        if (t < triangleStressProxy.size()) state[t].stressProxy = triangleStressProxy[t];
+        merged[t] = TriangleWeakness::combined(state[t], 1.f, 1.f, 1.f);
+    }
 
     const nlohmann::json* actions = nullptr;
     if (mergedReport.contains("design_actions") && mergedReport["design_actions"].is_array())
@@ -53,7 +61,9 @@ void buildMergedViewportHighlights(const GeometryAnalysisResult& geo, const std:
         stressThresh = sorted.empty() ? 0.f : *mid;
     }
 
-    auto thinPred = [&](size_t t) { return t < merged.size() && merged[t] > 0.02f && base[t] > 0.02f; };
+    auto thinPred = [&](size_t t) {
+        return t < merged.size() && merged[t] > 0.02f && state[t].geoWeakness > 0.02f;
+    };
 
     if (actions) {
         for (const auto& act : *actions) {
@@ -73,30 +83,40 @@ void buildMergedViewportHighlights(const GeometryAnalysisResult& geo, const std:
             for (size_t t = 0; t < merged.size(); ++t) {
                 float boost = 0.f;
                 if (hint == "thin_wall" || hint == "thin_feature") {
-                    if (thinPred(t)) boost = w * 0.85f + base[t] * 0.15f;
+                    if (thinPred(t)) boost = w * 0.85f + state[t].geoWeakness * 0.15f;
                 } else if (hint == "stress_hotspot" || hint == "high_curvature") {
                     if (!stress.empty() && t < stress.size() && stress[t] >= stressThresh)
                         boost = std::max(w * 0.5f + stress[t] * 0.5f, stress[t]);
                 } else if (hint == "boundary" || hint == "open_boundary") {
-                    if (t < base.size() && base[t] >= severityToWeakness(2) * 0.9f) boost = std::max(boost, w);
+                    if (t < state.size() && state[t].geoWeakness >= severityToWeakness(2) * 0.9f)
+                        boost = std::max(boost, w);
                 } else if (hint == "non_manifold") {
-                    if (t < base.size() && base[t] >= severityToWeakness(5) * 0.95f) boost = std::max(boost, w);
+                    if (t < state.size() && state[t].geoWeakness >= severityToWeakness(5) * 0.95f)
+                        boost = std::max(boost, w);
                 } else if (hint == "normals" || hint == "inverted_normals") {
-                    if (t < base.size() && base[t] > 0.15f && base[t] < 0.95f && base[t] > 0.2f)
-                        boost = std::max(boost, w * 0.6f + base[t] * 0.4f);
+                    if (t < state.size() && state[t].geoWeakness > 0.15f && state[t].geoWeakness < 0.95f &&
+                        state[t].geoWeakness > 0.2f)
+                        boost = std::max(boost, w * 0.6f + state[t].geoWeakness * 0.4f);
                 } else if (hint == "global" || hint == "general") {
-                    if (base[t] > 0.05f) boost = std::max(boost, w * 0.35f + base[t] * 0.65f);
+                    if (state[t].geoWeakness > 0.05f) boost = std::max(boost, w * 0.35f + state[t].geoWeakness * 0.65f);
                 }
 
                 if ((atype == "thickness" || atype == "thickness_reduction" || atype == "edge_smooth" ||
                      atype == "cutout" || atype == "weight_reduction") &&
-                    hint == "general" && base[t] > 0.08f)
-                    boost = std::max(boost, w * 0.4f + base[t] * 0.6f);
+                    hint == "general" && state[t].geoWeakness > 0.08f)
+                    boost = std::max(boost, w * 0.4f + state[t].geoWeakness * 0.6f);
 
                 if (boost > 0.f) merged[t] = std::clamp(std::max(merged[t], boost), 0.f, 1.f);
             }
         }
     }
+
+    if (outPerTriangleMerged) {
+        outPerTriangleMerged->resize(merged.size());
+        for (size_t t = 0; t < merged.size(); ++t) (*outPerTriangleMerged)[t] = std::clamp(merged[t], 0.f, 1.f);
+    }
+
+    if (outTriangleState) *outTriangleState = std::move(state);
 
     for (size_t t = 0; t < merged.size(); ++t) {
         if (merged[t] > 1e-5f) {

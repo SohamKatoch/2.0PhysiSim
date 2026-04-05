@@ -1,6 +1,6 @@
 # PhysiSim CAD (2.0)
 
-Mesh-first CAD prototype toward a **GPU + AI CAD/FEA** stack: **Vulkan** viewport, **command-based** geometry, **two-role AI** (design vs analysis signals over Ollama HTTP), and **deterministic + AI-assisted** mesh analysis with **severity-colored** highlights.
+Mesh-first CAD prototype toward a **GPU + AI CAD/FEA** stack: **Vulkan** viewport, **command-based** geometry, **two-role AI** (design vs analysis signals over Ollama HTTP), and **deterministic + AI-assisted** mesh analysis with **multi-channel defect visualization** (geometry, stress proxy, optional kinematic weights, connectivity-based propagation).
 
 | Doc | Purpose |
 |-----|---------|
@@ -25,6 +25,7 @@ Mesh-first CAD prototype toward a **GPU + AI CAD/FEA** stack: **Vulkan** viewpor
 - [Remote client](#vulkan-remote-client-physisim_client)
 - [Using the app](#using-the-app)
 - [Features & AI phases](#features--ai-phases)
+- [Defect highlighting (viewport)](#defect-highlighting-viewport)
 - [Command schema](#command-schema)
 - [FEM preflight](#fem-preflight-analyze_fem)
 - [Roadmap](#roadmap)
@@ -39,7 +40,7 @@ Source layout matches **ARCHITECTURE** (front-end, dual AI, FEA/CalculiX/workflo
 | `geometry/` | `Mesh`, STL, `MeshOperations`, `GeometryEngine` |
 | `rendering/` | `VulkanDevice`, pipelines, `Camera`, `RayPick` |
 | `ai/` | **Model 1:** orchestration, LLM/math clients, validation · **Model 2:** `AnalysisClient` (signals; FEA fields TBD) |
-| `analysis/` | Metrics, highlights, deterministic reports |
+| `analysis/` | Metrics, `GeometryAnalyzer`, `TriangleWeakness`, `MeshHighlightMerge`, `WeaknessField` (propagation / kinematic proxies) |
 | `ui/` | `ImGuiLayer` |
 | `platform/` | `FileDialog` (Windows) |
 | `ipc/` | `CommandApiServer` — localhost HTTP |
@@ -117,12 +118,12 @@ Mutations apply on the **next frame**. `GET /v1/mesh/stl` is `application/octet-
 6. **GPU smoothing:** **Run GPU Laplacian (1 step)** on active mesh (needs compute init).
 7. **Models:** **Models in scene** — click to set **Active** (only active mesh is drawn).
 8. **Commands / AI:** **Interpret + execute (LLM)** or paste JSON → **Execute JSON**. **Log** shows errors and results.
-9. **Analysis:** density (kg/m³), toggles, **Run analysis** → JSON + viewport tinting.
+9. **Analysis:** density (kg/m³), toggles, **Run analysis** → JSON + viewport tinting. After a run, **Defect heatmap (multi-channel)** exposes stress / velocity / load **scales**, **time mix** (blend toward a propagated field), **visual mode** (combined heatmap, RGB-style channels, or multi-objective emphasis), and **kinematic scenario** sliders (speed, accel/brake, cornering) plus **propagation factor** and **iterations** for a simple mesh-neighbor defect spread preview. Hover tooltips and the face inspector show merged severity, weighted combo, and (Ctrl) defect-direction hints.
 10. **Benchmark:** baseline STL path → **Compare baseline vs active** for deterministic deltas.
 
 ## Features & AI phases
 
-**Summary:** STL load/export, optional mesh insight, GPU Laplacian step, JSON + optional NL commands (Ollama), analysis with severity coloring, baseline comparison.
+**Summary:** STL load/export, optional mesh insight, GPU Laplacian step, JSON + optional NL commands (Ollama), analysis with multi-channel severity coloring and optional temporal/propagation preview, baseline comparison.
 
 | Phase | Behavior |
 |-------|----------|
@@ -130,7 +131,11 @@ Mutations apply on the **next frame**. `GET /v1/mesh/stl` is `application/octet-
 | **2 — RAG memory** | `AnalysisMemory` + fingerprinted snapshots; retrieval via L1 feature distance. |
 | **3 — Fine-tuning** | Out of repo; runtime rule: **engine = reality**, **AI = interpretation + suggestions**. |
 
-Highlighting (`defectHighlight` in `mesh.frag`): **green → red** by severity — thin slivers, non-manifold (5), boundaries (2), inconsistent normals when mesh-wide threshold trips (3).
+### Defect highlighting (viewport)
+
+Per-triangle state is a **`TriangleWeakness`** (`src/analysis/TriangleWeakness.h`): **geo** (thin slivers, non-manifold (5), open boundaries (2), inconsistent normals when mesh-wide threshold trips (3)), **stress proxy** (Laplacian-derived), optional **velocity** / **load** weights from kinematic sliders, and **defect direction** (face normal hint for tooling or future arrow viz). AI `design_actions` still merge with **`std::max`** on the scalar overlay so interpretation cannot reduce deterministic checks.
+
+**GPU:** each vertex carries **`defectHighlight`** as a **`glm::vec4`** (geo, stress, velocity, load), averaged from incident triangles, plus **`weaknessPropagated`** (scalar) for neighbor propagation. Uniforms supply scales, visual mode, and time mix; **`shaders/mesh.frag`** maps the result to the usual cool→hot tint (or channel / alignment modes). **GPU Laplacian** still reads/writes the **`.x`** (geo) channel as the smoothing weight passthrough.
 
 ## Command schema
 

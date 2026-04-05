@@ -47,8 +47,7 @@ GeometryAnalysisResult GeometryAnalyzer::analyze(const geometry::Mesh& mesh) {
     };
 
     const size_t triCount = mesh.indices.size() / 3;
-    r.triWeaknessAll.assign(triCount, 0.f);
-    std::vector<float>& triW = r.triWeaknessAll;
+    r.triWeaknessAll.assign(triCount, TriangleWeakness{});
 
     for (size_t t = 0; t < triCount; ++t) {
         uint32_t ia = mesh.indices[t * 3], ib = mesh.indices[t * 3 + 1], ic = mesh.indices[t * 3 + 2];
@@ -65,7 +64,8 @@ GeometryAnalysisResult GeometryAnalyzer::analyze(const geometry::Mesh& mesh) {
             float ratio = localMin / localMax;
             if (ratio < thinRatioThreshold) {
                 float w = 1.f - ratio / thinRatioThreshold;
-                triW[t] = std::max(triW[t], std::clamp(w, 0.f, 1.f));
+                float& g = r.triWeaknessAll[t].geoWeakness;
+                g = std::max(g, std::clamp(w, 0.f, 1.f));
             }
         }
 
@@ -116,8 +116,14 @@ GeometryAnalysisResult GeometryAnalyzer::analyze(const geometry::Mesh& mesh) {
                 auto it = edgeCount.find(EdgeKey{u, v});
                 if (it == edgeCount.end()) return;
                 int c = it->second;
-                if (c > 2) triW[t] = std::max(triW[t], wNonManifold);
-                if (c == 1) triW[t] = std::max(triW[t], wBoundary);
+                if (c > 2) {
+                    float& g = r.triWeaknessAll[t].geoWeakness;
+                    g = std::max(g, wNonManifold);
+                }
+                if (c == 1) {
+                    float& g = r.triWeaknessAll[t].geoWeakness;
+                    g = std::max(g, wBoundary);
+                }
             };
             touchEdge(ia, ib);
             touchEdge(ib, ic);
@@ -152,14 +158,30 @@ GeometryAnalysisResult GeometryAnalyzer::analyze(const geometry::Mesh& mesh) {
             if (triNormalBad[t] <= 0.f) continue;
             float inv = std::clamp((triNormalBad[t] - 0.2f) / (1.f - 0.2f), 0.f, 1.f);
             float w = wBadNormal * (0.35f + 0.65f * inv);
-            triW[t] = std::max(triW[t], w);
+            float& g = r.triWeaknessAll[t].geoWeakness;
+            g = std::max(g, w);
         }
     }
 
     for (size_t t = 0; t < triCount; ++t) {
-        if (triW[t] > 1e-5f) {
+        uint32_t ia = mesh.indices[t * 3], ib = mesh.indices[t * 3 + 1], ic = mesh.indices[t * 3 + 2];
+        if (ia < mesh.positions.size() && ib < mesh.positions.size() && ic < mesh.positions.size()) {
+            glm::vec3 a = mesh.positions[ia], b = mesh.positions[ib], c = mesh.positions[ic];
+            glm::vec3 e1 = b - a, e2 = c - a;
+            glm::vec3 fn = glm::cross(e1, e2);
+            float len = glm::length(fn);
+            if (len > 1e-20f)
+                r.triWeaknessAll[t].defectDirection = fn / len;
+            else
+                r.triWeaknessAll[t].defectDirection = glm::vec3(0.f, 1.f, 0.f);
+        }
+    }
+
+    for (size_t t = 0; t < triCount; ++t) {
+        float g = r.triWeaknessAll[t].geoWeakness;
+        if (g > 1e-5f) {
             r.highlightedTriangles.push_back(static_cast<uint32_t>(t));
-            r.highlightedWeakness.push_back(std::clamp(triW[t], 0.f, 1.f));
+            r.highlightedWeakness.push_back(std::clamp(g, 0.f, 1.f));
         }
     }
 

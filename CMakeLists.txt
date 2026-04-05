@@ -104,6 +104,7 @@ add_executable(physisim
   src/analysis/MeshMetrics.cpp
   src/analysis/MeshHighlightMerge.cpp
   src/analysis/MeshBenchmark.cpp
+  src/analysis/WeaknessField.cpp
   src/fea/MeshAdjacency.cpp
   src/fea/GpuLaplacianSmooth.cpp
   src/fem/TetrahedralMesh.cpp

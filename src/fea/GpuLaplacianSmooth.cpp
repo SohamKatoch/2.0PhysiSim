@@ -350,7 +350,7 @@ bool GpuLaplacianSmooth::smoothStep(geometry::Mesh& mesh, float lambda, std::str
     auto* posOut = static_cast<glm::vec4*>(posOutMapped_);
     for (size_t i = 0; i < V; ++i) {
         glm::vec3 p = mesh.positions[i];
-        float w = (i < mesh.defectHighlight.size()) ? mesh.defectHighlight[i] : 0.f;
+        float w = (i < mesh.defectHighlight.size()) ? mesh.defectHighlight[i].x : 0.f;
         posIn[i] = glm::vec4(p, w);
     }
     std::memcpy(neighIdxMapped_, neighIdx.data(), idxBytes);
@@ -404,7 +404,7 @@ bool GpuLaplacianSmooth::smoothStep(geometry::Mesh& mesh, float lambda, std::str
 
     for (size_t i = 0; i < V; ++i) {
         mesh.positions[i] = glm::vec3(posOut[i].x, posOut[i].y, posOut[i].z);
-        if (i < mesh.defectHighlight.size()) mesh.defectHighlight[i] = posOut[i].w;
+        if (i < mesh.defectHighlight.size()) mesh.defectHighlight[i].x = posOut[i].w;
     }
 
     mesh.recomputeNormals();
