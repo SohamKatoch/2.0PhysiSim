@@ -40,9 +40,9 @@ This document is the **north star** for PhysiSim: how the full system is intende
   - **Visualization** of stress, displacement, thermal fields (same or linked render pass).
 - Delivers **interactive feedback** to the user and to **AI model 2**.
 
-**In-repo today:** Vulkan is used for **mesh drawing** (`rendering/`, `shaders/mesh.*`). A first **Vulkan compute** path lives under **`fea/`** (`GpuLaplacianSmooth`, `shaders/fea/laplacian_smooth.comp`): one **Jacobi Laplacian** smoothing step on the GPU (PoC; results read back to CPU). Full **elasticity / CG solvers** and **field visualization** are still to add.
+**In-repo today:** Vulkan is used for **mesh drawing** (`rendering/`, `shaders/mesh.*`). A first **Vulkan compute** path lives under **`fea/`** (`GpuLaplacianSmooth`, `shaders/fea/laplacian_smooth.comp`): one **Jacobi Laplacian** smoothing step on the GPU (PoC; results read back to CPU). A separate **CPU** path under **`sim/`** (`MassSpringSystem`) provides a **mass–spring** mesh preview: edge springs, optional boundary fixes, strain mapped into the existing defect highlight pipeline — **not** a substitute for FEA. Full **elasticity / CG solvers** and **field visualization** on GPU are still to add.
 
-**Next steps in-tree:** device-local SSBOs + ping-pong, stress/displacement buffers, render pass or fragment mapping for false-color fields; optional `shaders/fea/` for more kernels.
+**Next steps in-tree:** device-local SSBOs + ping-pong, stress/displacement buffers, render pass or fragment mapping for false-color fields; optional `shaders/fea/` for more kernels; optional migration or complement to `sim/` for interactive deformation.
 
 ---
 
@@ -78,6 +78,7 @@ This document is the **north star** for PhysiSim: how the full system is intende
 | §2 AI model 1 | `ai/AIOrchestrator`, `LLMClient`, `MathClient` | Active (HTTP/Ollama) |
 | §2 AI model 2 | `ai/AnalysisClient`, `analysis/*` | Active (mesh analysis); FEA coupling **TBD** |
 | §3 GPU FEA | `fea/GpuLaplacianSmooth`, `shaders/fea/laplacian_smooth.comp` | **Started** (compute Laplacian PoC); full solver + field viz **TBD** |
+| §3 CPU deformation preview | `sim/MassSpringSystem` | **Started** (edge mass–spring, strain → viewport); not coupled to CalculiX / not AI-writable |
 | §4 CalculiX | — | **Planned** (async validation) |
 | §5 Export | `geometry/Mesh` STL | Partial |
 
@@ -90,4 +91,4 @@ This document is the **north star** for PhysiSim: how the full system is intende
 3. **GPU solver** is the interactive path; **CalculiX** is verification, not the main thread.
 4. **Engine ground truth** (geometry metrics, later FEA norms) is not overridden by model outputs — AI suggests; validators and solvers decide.
 
-When adding FEA or CalculiX, update this file and the README **Layout** table so newcomers see the same story.
+When adding FEA, CalculiX, or replacing the mass–spring preview with a real solver, update this file and the README **Layout** table so newcomers see the same story.

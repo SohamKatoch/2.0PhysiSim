@@ -10,7 +10,10 @@ namespace physisim::analysis {
 /// Per-triangle multi-factor weakness (deterministic + proxies + optional AI/visualization fields).
 struct TriangleWeakness {
     float geoWeakness{0.f};
+    /// Laplacian / heuristic proxy from analysis (deterministic).
     float stressProxy{0.f};
+    /// Mass–spring edge strain mapped to [0,1]; visualization uses max with stressProxy in the stress channel.
+    float strainStress{0.f};
     float velocityWeight{0.f};
     float loadWeight{0.f};
     glm::vec3 defectDirection{0.f};

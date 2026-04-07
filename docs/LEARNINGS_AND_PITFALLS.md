@@ -32,9 +32,9 @@ For the **target CAD + dual-AI + GPU FEA + CalculiX** system shape and module ma
 
 ### 4. Vertex layout vs shader
 
-**Learning:** Interleaved vertex attributes must match `VkVertexInputAttributeDescription` offsets exactly (we use 32-byte stride: `vec3` + pad + `vec3` + `float` defect weight).
+**Learning:** Interleaved vertex attributes must match `VkVertexInputAttributeDescription` offsets exactly. The mesh pipeline uses **52-byte** strides: `vec3` position + pad, `vec3` normal, **`vec4` defect** (geo / stress / velocity / load), pick `float`, **propagated-strain** `float` — see `rendering/VulkanPipeline.cpp` and `shaders/mesh.vert`.
 
-**Pitfall:** Packing `defect` at the wrong float index makes highlights silently wrong.
+**Pitfall:** Mismatching stride or attribute offsets (or an old “32-byte + single float defect” mental model) makes highlights or picking silently wrong.
 
 ### 5. Namespace lookup (`core::Command` inside `physisim::ai`)
 
@@ -65,6 +65,18 @@ For the **target CAD + dual-AI + GPU FEA + CalculiX** system shape and module ma
 | Broad substring match for “manifold” in AI feedback | False positives when AI says “watertight manifold” | Restrict non-manifold detection to “non-manifold” / “nonmanifold” substrings. |
 | `destroySwapchain` helper left unused | Dead code / confusion | Remove or wire into resize; we inlined resize logic. |
 | Assuming CMake/`glslc` on PATH in CI or agent shells | Configure fails | Document Vulkan SDK `Bin` in PATH; `find_program(GLSLC ... HINTS ...)`. |
+| Treating **mass–spring preview** as engineering stress | Wrong design decisions | It is **CPU**, **heuristic**, and **deforms** the display mesh; validate with real FEA (`analyze_fem` / future GPU solver). |
+| Exporting STL while preview is on | Deformed geometry in downstream tools | Disable preview and reset to analysis rest, or export intentionally knowing vertices are warped. |
+
+---
+
+## Mass–spring preview (`sim/MassSpringSystem`)
+
+**Learning:** A cheap edge network gives **plausible motion** and a **strain scalar** for false-color, but it is **not** linear elasticity, has **no** material law beyond Hooke springs, and **stiffness** is tied to `geoWeakness`, not Young’s modulus.
+
+**Pitfall:** Large `dt`, low damping, or huge external force scale can **explode** the mesh; use **Reset mesh to analysis rest** and smaller substeps / forces.
+
+**Contract:** AI layers do **not** write spring state; strain comes only from the deterministic step + mesh geometry.
 
 ---
 
@@ -106,3 +118,4 @@ For the **target CAD + dual-AI + GPU FEA + CalculiX** system shape and module ma
 ## Changelog of this doc
 
 - Initial version: hybrid AI phases, Vulkan/ImGui pitfalls, open product questions.
+- Vertex layout note updated for **52-byte** mesh vertices + `vec4` defect; added **mass–spring** pitfalls and export warning.

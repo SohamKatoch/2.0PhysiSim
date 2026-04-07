@@ -107,6 +107,7 @@ add_executable(physisim
   src/analysis/WeaknessField.cpp
   src/fea/MeshAdjacency.cpp
   src/fea/GpuLaplacianSmooth.cpp
+  src/sim/MassSpringSystem.cpp
   src/fem/TetrahedralMesh.cpp
   src/fem/FemMeshReadiness.cpp
   src/fem/FemCompare.cpp
