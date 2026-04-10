@@ -1,0 +1,21 @@
+# PhysiSim: Vulkan UI + HTTP IPC. Default image uses Xvfb + Lavapipe (CPU). From repo root: docker compose up --build
+services:
+  physisim:
+    build: .
+    ports:
+      - "17500:17500"
+    environment:
+      PHYSISIM_IPC_PORT: "17500"
+      PHYSISIM_IPC_HOST: "0.0.0.0"
+    # Optional: persist models or CalculiX scratch (mount host paths as needed)
+    # volumes:
+    #   - ./data:/data
+    # GPU (NVIDIA): use an nvidia/cuda or ubuntu image with drivers, install vulkan,
+    # unset VK_ICD_FILENAMES, set NVIDIA_VISIBLE_DEVICES=all, and add:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

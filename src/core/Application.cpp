@@ -410,11 +410,24 @@ static uint16_t parseIpcPort(int argc, char** argv) {
     return 0;
 }
 
+/// Bind address for the HTTP API (127.0.0.1 default; use 0.0.0.0 in Docker with port publish).
+static std::string parseIpcListenHost(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a = argv[i];
+        if (a == "--ipc-host" && i + 1 < argc) return std::string(argv[++i]);
+        if (a.size() > 12 && a.substr(0, 12) == "--ipc-host=") return std::string(a.substr(12));
+    }
+    if (const char* e = std::getenv("PHYSISIM_IPC_HOST")) return std::string(e);
+    return "127.0.0.1";
+}
+
 static void printHelp() {
     std::printf(
         "PhysiSim CAD\n"
-        "  --ipc-port <n>     HTTP JSON API on 127.0.0.1:n for terminals / custom UIs\n"
+        "  --ipc-port <n>     HTTP JSON API on --ipc-host:n (default host 127.0.0.1)\n"
         "  PHYSISIM_IPC_PORT  same if --ipc-port not passed\n"
+        "  --ipc-host <addr>  bind address (default 127.0.0.1; 0.0.0.0 = all interfaces)\n"
+        "  PHYSISIM_IPC_HOST  same if --ipc-host not passed\n"
         "  --help             this message\n");
 }
 
@@ -429,6 +442,7 @@ int Application::run(int argc, char** argv) {
     }
 
     const uint16_t ipcPort = parseIpcPort(argc, argv);
+    const std::string ipcListenHost = parseIpcListenHost(argc, argv);
 
     if (!glfwInit()) return 1;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -516,10 +530,11 @@ int Application::run(int argc, char** argv) {
             [&ipcStlBlob, &ipcApiMu] {
                 std::lock_guard<std::mutex> lk(ipcApiMu);
                 return ipcStlBlob;
-            });
+            },
+            ipcListenHost);
         std::fprintf(stderr,
-                     "[ipc] HTTP API http://127.0.0.1:%u/  (GET /v1/health, /v1/scene, /v1/mesh/stl, ...)\n",
-                     static_cast<unsigned>(ipcPort));
+                     "[ipc] HTTP API http://%s:%u/  (GET /v1/health, /v1/scene, /v1/mesh/stl, ...)\n",
+                     ipcListenHost.c_str(), static_cast<unsigned>(ipcPort));
     }
 
     std::unique_ptr<fea::GpuLaplacianSmooth> gpuLaplacian;
@@ -1158,7 +1173,8 @@ int Application::run(int argc, char** argv) {
             nlohmann::json j;
             j["active"] = scene.activeModelId();
             j["ids"] = scene.ids();
-            if (ipcPort > 0) j["ipc_url"] = "http://127.0.0.1:" + std::to_string(ipcPort);
+            if (ipcPort > 0)
+                j["ipc_url"] = "http://" + ipcListenHost + ":" + std::to_string(ipcPort);
             std::lock_guard<std::mutex> lk(ipcApiMu);
             ipcSceneJson = j.dump();
             auto* n = scene.find(scene.activeModelId());
@@ -1175,9 +1191,9 @@ int Application::run(int argc, char** argv) {
             ImGui::SetNextWindowSize(ImVec2(396.f, 232.f), ImGuiCond_FirstUseEver);
             ImGui::Begin("API");
             ImGui::TextWrapped(
-                "HTTP API on 127.0.0.1 — use curl, PowerShell, or your own app. "
+                "HTTP API — use curl, PowerShell, or your own app. "
                 "Mutations are applied on the next frame (Vulkan-safe).");
-            ImGui::Text("Base URL: http://127.0.0.1:%u", static_cast<unsigned>(ipcPort));
+            ImGui::Text("Base URL: http://%s:%u", ipcListenHost.c_str(), static_cast<unsigned>(ipcPort));
             ImGui::BulletText("GET  /v1/health");
             ImGui::BulletText("GET  /v1/scene");
             ImGui::BulletText("GET  /v1/mesh/stl  (binary STL of active mesh)");

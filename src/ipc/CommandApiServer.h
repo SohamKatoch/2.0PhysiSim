@@ -19,7 +19,7 @@ struct PendingOp {
     std::string payload;
 };
 
-/// Minimal HTTP API on 127.0.0.1 — for terminals / custom UIs. Mutations are queued for the main thread.
+/// Minimal HTTP API (default bind 127.0.0.1) — for terminals / custom UIs. Mutations are queued for the main thread.
 class CommandApiServer {
 public:
     CommandApiServer();
@@ -27,8 +27,10 @@ public:
 
     /// `getSceneJson` / `getMeshStlBinary` run on worker threads — must be thread-safe.
     /// `getMeshStlBinary` empty vector → GET /v1/mesh/stl returns 404.
+    /// `listenHost` e.g. "127.0.0.1" (default) or "0.0.0.0" for containers (exposes API on all interfaces).
     bool start(uint16_t port, std::function<std::string()> getSceneJson,
-                std::function<std::vector<uint8_t>()> getMeshStlBinary = {});
+                std::function<std::vector<uint8_t>()> getMeshStlBinary = {},
+                std::string listenHost = "127.0.0.1");
     void stop();
 
     bool poll(PendingOp& out);
@@ -39,6 +41,7 @@ private:
 
     std::function<std::string()> sceneFn_;
     std::function<std::vector<uint8_t>()> meshStlFn_;
+    std::string listenHost_{"127.0.0.1"};
     uint16_t port_{0};
 
     std::mutex qMu_;

@@ -79,6 +79,17 @@ Shaders compile into `build/.../shaders/`; `PHYSISIM_SHADER_DIR` points there.
 
 **`physisim` not on PATH:** the `.exe` stays under `build\` — use a full path, or from repo root `.\scripts\Run-PhysiSim.ps1` (see script for flags). Debug builds use `build\Debug\`.
 
+### Docker
+
+Linux image: builds in-container, runs **Xvfb** + **Lavapipe** (CPU Vulkan) so GLFW/Vulkan start without a physical display. The HTTP API binds **`0.0.0.0`** inside the image so you can publish a port.
+
+```bash
+docker compose up --build
+# API: http://127.0.0.1:17500/v1/health
+```
+
+Override bind address or port with **`PHYSISIM_IPC_HOST`** / **`PHYSISIM_IPC_PORT`** or **`--ipc-host`** / **`--ipc-port`**. Binding to all interfaces exposes the API with **no authentication** — use only on trusted networks or behind a reverse proxy.
+
 ## Localhost HTTP API
 
 **127.0.0.1 only:** `physisim --ipc-port 17500` or `PHYSISIM_IPC_PORT=17500`.

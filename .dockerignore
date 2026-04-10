@@ -1,0 +1,14 @@
+.git
+.github
+build
+out
+cmake-build-*
+.vs
+.vscode
+*.user
+*.suo
+Thumbs.db
+**/.DS_Store
+*.md
+!README.md
+.cursor

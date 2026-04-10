@@ -135,17 +135,19 @@ void CommandApiServer::threadMain(std::shared_ptr<std::promise<void>> ready) {
         }
     });
 
-    if (!svr.listen("127.0.0.1", static_cast<int>(port_))) {
-        std::fprintf(stderr, "[ipc] Failed to listen on 127.0.0.1:%u (port in use?)\n", port_);
+    if (!svr.listen(listenHost_.c_str(), static_cast<int>(port_))) {
+        std::fprintf(stderr, "[ipc] Failed to listen on %s:%u (port in use?)\n", listenHost_.c_str(), port_);
     }
     server_ = nullptr;
 }
 
 bool CommandApiServer::start(uint16_t port, std::function<std::string()> getSceneJson,
-                             std::function<std::vector<uint8_t>()> getMeshStlBinary) {
+                             std::function<std::vector<uint8_t>()> getMeshStlBinary,
+                             std::string listenHost) {
     stop();
     if (port == 0) return false;
     port_ = port;
+    listenHost_ = listenHost.empty() ? "127.0.0.1" : std::move(listenHost);
     sceneFn_ = std::move(getSceneJson);
     meshStlFn_ = std::move(getMeshStlBinary);
     auto ready = std::make_shared<std::promise<void>>();
