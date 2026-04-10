@@ -43,12 +43,14 @@ public:
     DefectReport evaluate(const geometry::Mesh& mesh, const DefectDetectorOptions& opts);
 
     void setAnalysisModelHost(const std::string& host, int port);
+    void setAnalysisModelName(const std::string& model);
 
 private:
     static nlohmann::json parseJsonObject(const std::string& text);
 
     std::string host_{"127.0.0.1"};
     int port_{11434};
+    std::string model_{"llama3.1:8b"};
 };
 
 } // namespace physisim::analysis

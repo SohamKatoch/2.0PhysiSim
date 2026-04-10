@@ -24,6 +24,19 @@ struct MeshDefectViewParams {
     float visualMode{0.f};
     /// Blends local combined metric with mesh-connectivity propagated field.
     float timeMix{0.f};
+    /// Remap heat using frame min–max of the mixed scalar (see `MeshVizPost`).
+    bool dynamicNormalization{false};
+    int vizSmoothPasses{2};
+    float vizSmoothLambda{0.5f};
+    bool strainAlert{true};
+    float strainAlertThreshold{0.7f};
+    bool strainAlertBlink{false};
+    /// Emphasize motion direction vs normal (0 = off).
+    float directionVizWeight{0.35f};
+    float vizTimeSec{0.f};
+    /// Filled before draw when dynamicNormalization is on (else ignored).
+    float heatRangeMin{0.f};
+    float heatRangeMax{1.f};
 };
 
 struct GpuMesh {
@@ -47,7 +60,9 @@ public:
                         const MeshDefectViewParams& defectView = MeshDefectViewParams{});
     bool endFrame();
 
-    void uploadMesh(const geometry::Mesh& mesh, std::string& err);
+    /// When `restPositions` is non-null and matches vertex count, uploads it as attribute for direction / exaggeration viz.
+    void uploadMesh(const geometry::Mesh& mesh, std::string& err,
+                    const std::vector<glm::vec3>* restPositions = nullptr);
 
     GLFWwindow* window() const { return window_; }
     VkInstance instance() const { return dev_.instance(); }
@@ -117,8 +132,12 @@ private:
         glm::vec4 cameraWorld{};
         /// xyz = stress / velocity / load scales; w = visualMode.
         glm::vec4 defectScales{};
-        /// x = timeMix (propagated vs local); yzw unused.
+        /// x = timeMix; y = heat dyn min; z = heat dyn max; w = strain alert threshold.
         glm::vec4 defectTime{};
+        /// x = dynamic norm on (1/0); y = alert on; z = blink on; w = time (s) for blink.
+        glm::vec4 defectAux{};
+        /// x = direction viz weight; yzw unused.
+        glm::vec4 defectAux2{};
     };
 };
 

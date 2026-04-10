@@ -524,7 +524,11 @@ void VulkanRenderer::recordMeshPass(const geometry::Mesh& mesh, const glm::mat4&
     u.cameraWorld = glm::vec4(cam.eyePosition(), 0.f);
     u.defectScales =
         glm::vec4(defectView.stressScale, defectView.velocityScale, defectView.loadScale, defectView.visualMode);
-    u.defectTime = glm::vec4(defectView.timeMix, 0.f, 0.f, 0.f);
+    u.defectTime = glm::vec4(defectView.timeMix, defectView.heatRangeMin, defectView.heatRangeMax,
+                             defectView.strainAlertThreshold);
+    u.defectAux = glm::vec4(defectView.dynamicNormalization ? 1.f : 0.f, defectView.strainAlert ? 1.f : 0.f,
+                            defectView.strainAlertBlink ? 1.f : 0.f, defectView.vizTimeSec);
+    u.defectAux2 = glm::vec4(defectView.directionVizWeight, 0.f, 0.f, 0.f);
     std::memcpy(uboMapped_, &u, sizeof(u));
 
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
@@ -566,11 +570,12 @@ bool VulkanRenderer::endFrame() {
     return pr == VK_SUCCESS || pr == VK_SUBOPTIMAL_KHR;
 }
 
-void VulkanRenderer::uploadMesh(const geometry::Mesh& mesh, std::string& err) {
+void VulkanRenderer::uploadMesh(const geometry::Mesh& mesh, std::string& err,
+                                const std::vector<glm::vec3>* restPositions) {
     VkDevice device = dev_.device();
     gpuMesh_.destroy(device);
 
-    constexpr size_t kVtxStride = 52;
+    constexpr size_t kVtxStride = 64;
     std::vector<uint8_t> vtx;
     vtx.resize(mesh.positions.size() * kVtxStride);
     for (size_t i = 0; i < mesh.positions.size(); ++i) {
@@ -592,6 +597,11 @@ void VulkanRenderer::uploadMesh(const geometry::Mesh& mesh, std::string& err) {
         p[11] = pk;
         float pr = (i < mesh.weaknessPropagated.size()) ? mesh.weaknessPropagated[i] : 0.f;
         p[12] = pr;
+        glm::vec3 rp = mesh.positions[i];
+        if (restPositions && i < restPositions->size()) rp = (*restPositions)[i];
+        p[13] = rp.x;
+        p[14] = rp.y;
+        p[15] = rp.z;
     }
 
     VkBufferCreateInfo vbci{};

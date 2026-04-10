@@ -5,6 +5,7 @@ layout(location = 1) in vec3 fragWorldPos;
 layout(location = 2) in vec4 fragDefect;
 layout(location = 3) in float fragPick;
 layout(location = 4) in float fragPropagated;
+layout(location = 5) in vec3 fragDispWorld;
 
 layout(set = 0, binding = 0) uniform UBO {
     mat4 model;
@@ -13,11 +14,12 @@ layout(set = 0, binding = 0) uniform UBO {
     vec4 cameraWorld;
     vec4 defectScales;
     vec4 defectTime;
+    vec4 defectAux;
+    vec4 defectAux2;
 } ubo;
 
 layout(location = 0) out vec4 outColor;
 
-/// Maps weakness [0,1] to a continuous blue → cyan → green → yellow → red heatmap.
 vec3 weaknessHeatmap(float h) {
     h = clamp(h, 0.0, 1.0);
     vec3 k0 = vec3(0.05, 0.14, 0.62);
@@ -66,12 +68,21 @@ void main() {
 
     float align = clamp(r * 0.35 + g * sS * 0.35 + b * sV * 0.15 + a * sL * 0.15, 0.0, 1.0);
 
-    float h = mixed;
-    if (vMode > 1.5) h = align;
+    float hPre = mixed;
+    if (vMode > 1.5) hPre = align;
+
+    bool dynOn = ubo.defectAux.x > 0.5;
+    float h = hPre;
+    if (dynOn) {
+        float lo = ubo.defectTime.y;
+        float hi = ubo.defectTime.z;
+        float denom = max(hi - lo, 1e-5);
+        h = clamp((hPre - lo) / denom, 0.0, 1.0);
+    }
 
     vec3 heat = weaknessHeatmap(h);
     float gamma = 0.72;
-    float heatBlend = smoothstep(0.0, 0.035, h) * (0.28 + 0.67 * pow(h, gamma));
+    float heatBlend = smoothstep(0.0, 0.02, h) * (0.32 + 0.68 * pow(h, gamma));
     vec3 heatLit = heat * (0.26 + 0.74 * diff);
     vec3 lit = baseLit;
 
@@ -82,6 +93,26 @@ void main() {
         lit = mix(baseLit, fcLit, smoothstep(0.02, 0.25, fcm) * 0.55);
     } else {
         lit = mix(baseLit, heatLit, heatBlend);
+    }
+
+    bool alertOn = ubo.defectAux.y > 0.5;
+    if (alertOn) {
+        float thresh = clamp(ubo.defectTime.w, 0.0, 1.0);
+        float aAlert = smoothstep(thresh, min(thresh + 0.08, 1.0), h);
+        float blink = 1.0;
+        if (ubo.defectAux.z > 0.5) blink = 0.62 + 0.38 * sin(ubo.defectAux.w * 8.0);
+        vec3 alertCol = vec3(0.96, 0.07, 0.06);
+        lit = mix(lit, alertCol, aAlert * 0.82 * blink);
+    }
+
+    float dirW = clamp(ubo.defectAux2.x, 0.0, 1.0);
+    if (dirW > 1e-3) {
+        float dl = length(fragDispWorld);
+        if (dl > 1e-6) {
+            float dirCue = abs(dot(N, normalize(fragDispWorld)));
+            float shade = mix(0.72, 1.08, dirCue);
+            lit *= mix(1.0, shade, dirW);
+        }
     }
 
     float pk = clamp(fragPick, 0.0, 1.0);

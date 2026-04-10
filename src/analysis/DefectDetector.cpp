@@ -16,6 +16,8 @@ void DefectDetector::setAnalysisModelHost(const std::string& host, int port) {
     port_ = port;
 }
 
+void DefectDetector::setAnalysisModelName(const std::string& model) { model_ = model; }
+
 nlohmann::json DefectDetector::parseJsonObject(const std::string& text) {
     auto start = text.find('{');
     auto end = text.rfind('}');
@@ -82,6 +84,7 @@ DefectReport DefectDetector::evaluate(const geometry::Mesh& mesh, const DefectDe
     ai::AnalysisClientConfig cfg;
     cfg.host = host_;
     cfg.port = port_;
+    cfg.model = model_;
     ai::AnalysisClient client(cfg);
 
     std::string aiText;

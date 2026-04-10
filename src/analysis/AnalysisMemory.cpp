@@ -30,7 +30,8 @@ nlohmann::json AnalysisMemory::fingerprint(const nlohmann::json& heuristics, con
 
 float AnalysisMemory::l1Distance(const nlohmann::json& a, const nlohmann::json& b) {
     float d = 0.f;
-    for (const char* k : {"log1p_triangles", "non_manifold", "open_boundary", "thin", "edge_length_ratio"}) {
+    for (const char* k : {"log1p_triangles", "non_manifold", "open_boundary", "thin", "edge_length_ratio",
+                          "max_strain", "avg_strain"}) {
         float x = a.contains(k) && a[k].is_number() ? a[k].get<float>() : 0.f;
         float y = b.contains(k) && b[k].is_number() ? b[k].get<float>() : 0.f;
         d += std::fabs(x - y);

@@ -25,6 +25,13 @@ public:
     /// engine numbers as overrides — suggestions and narrative only.
     bool refineWithFeedback(const std::string& feedbackPayloadJson, std::string& outText, std::string& err);
 
+    /// Model 2 optimizer: structured simulation summary → JSON with executable PhysiSim commands only.
+    /// Engine metrics are authoritative; model must not invent physics. Output must match CommandValidator.
+    bool proposeEngineCommands(const std::string& simulationPackJson, const std::string& objectiveJson,
+                               int iterationIndex, const std::string& priorIterationSummaryJson, int maxProposals,
+                               float minConfidence, const std::string& ragContext, std::string& outRawJson,
+                               std::string& err);
+
 private:
     AnalysisClientConfig cfg_;
 };

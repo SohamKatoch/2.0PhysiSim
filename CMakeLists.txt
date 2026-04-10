@@ -90,10 +90,12 @@ add_executable(physisim
   src/rendering/VulkanPipeline.cpp
   src/rendering/VulkanRenderer.cpp
   src/rendering/RayPick.cpp
+  src/rendering/MeshVizPost.cpp
   src/ai/LLMClient.cpp
   src/ai/MathClient.cpp
   src/ai/AnalysisClient.cpp
   src/ai/CommandValidator.cpp
+  src/ai/OptimizerCommands.cpp
   src/ai/AIOrchestrator.cpp
   src/analysis/GeometryAnalyzer.cpp
   src/analysis/HeuristicAnalyzer.cpp
@@ -103,11 +105,14 @@ add_executable(physisim
   src/analysis/DefectDetector.cpp
   src/analysis/MeshMetrics.cpp
   src/analysis/MeshHighlightMerge.cpp
+  src/analysis/SimulationInsightPack.cpp
   src/analysis/MeshBenchmark.cpp
   src/analysis/WeaknessField.cpp
   src/fea/MeshAdjacency.cpp
   src/fea/GpuLaplacianSmooth.cpp
   src/sim/MassSpringSystem.cpp
+  src/sim/SimulationScenario.cpp
+  src/sim/Constraints.cpp
   src/fem/TetrahedralMesh.cpp
   src/fem/FemMeshReadiness.cpp
   src/fem/FemCompare.cpp

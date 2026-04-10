@@ -26,9 +26,13 @@
 
 #include <imgui.h>
 
+#include "ai/AnalysisClient.h"
 #include "ai/AIOrchestrator.h"
+#include "ai/OptimizerCommands.h"
 #include "ai/CommandValidator.h"
+#include "analysis/AnalysisMemory.h"
 #include "analysis/DefectDetector.h"
+#include "analysis/SimulationInsightPack.h"
 #include "analysis/GeometryAnalyzer.h"
 #include "analysis/MeshBenchmark.h"
 #include "analysis/MeshHighlightMerge.h"
@@ -48,8 +52,10 @@
 #include "rendering/RayPick.h"
 #include "ipc/CommandApiServer.h"
 #include "platform/FileDialog.h"
+#include "rendering/MeshVizPost.h"
 #include "rendering/VulkanRenderer.h"
 #include "sim/MassSpringSystem.h"
+#include "sim/SimulationScenario.h"
 #include "ui/ImGuiLayer.h"
 
 namespace physisim::core {
@@ -72,6 +78,81 @@ struct InsightCache {
     float meshUnitToMm{1.f};
     bool valid{false};
 };
+
+static constexpr int kNumSimMaterialPresets = 3;
+static const sim::SimMaterial kSimMaterialPresets[kNumSimMaterialPresets] = {
+    {200e9f, 7850.f, 0.02f},
+    {69e9f, 2700.f, 0.03f},
+    {2e6f, 920.f, 0.35f},
+};
+
+static const char* kSimMaterialPackIds[kNumSimMaterialPresets] = {"mild_steel", "aluminum", "rubber_like"};
+
+static std::string scenarioLabelString(sim::ScenarioType t) {
+    switch (t) {
+    case sim::ScenarioType::Highway:
+        return "highway";
+    case sim::ScenarioType::Braking:
+        return "braking";
+    case sim::ScenarioType::Cornering:
+        return "cornering";
+    case sim::ScenarioType::Bump:
+        return "bump";
+    }
+    return "unknown";
+}
+
+/// Deterministic analysis refresh (no Model 2 call) after geometry edits in the optimizer loop.
+static void refreshInsightDeterministic(core::Scene& scene, const std::string& activeId, InsightCache& meshInsight,
+                                        float meshUnitToMm, float densityKg, analysis::DefectDetector& defectDetector,
+                                        bool physicsSimEnabled, sim::MassSpringSystem& massSpring,
+                                        const sim::MassSpringParams& springParams, bool constraintsEnabled,
+                                        std::string& commandLog) {
+    auto* node = scene.find(activeId);
+    if (!node || !node->mesh) return;
+    analysis::DefectDetectorOptions opts;
+    opts.useAi = false;
+    opts.feedbackLoop = false;
+    opts.useRag = false;
+    opts.persistCase = false;
+    opts.meshUnitToMm = meshUnitToMm;
+    opts.materialDensityKgPerM3 = densityKg;
+    opts.caseLabel = activeId;
+    auto rep = defectDetector.evaluate(*node->mesh, opts);
+    auto det = analysis::GeometryAnalyzer::analyze(*node->mesh);
+    std::vector<uint32_t> hi;
+    std::vector<float> hw;
+    std::vector<float> triMerged;
+    std::vector<analysis::TriangleWeakness> mergedState;
+    analysis::buildMergedViewportHighlights(det, rep.triangleStressProxy, rep.merged, hi, hw, &triMerged,
+                                              &mergedState);
+    meshInsight.triScenarioSource = std::move(mergedState);
+    meshInsight.triWeakness = std::move(triMerged);
+    meshInsight.triStress.resize(meshInsight.triScenarioSource.size());
+    for (size_t ti = 0; ti < meshInsight.triStress.size(); ++ti)
+        meshInsight.triStress[ti] = meshInsight.triScenarioSource[ti].stressProxy;
+    meshInsight.merged = rep.merged;
+    meshInsight.meshUnitToMm = meshUnitToMm;
+    meshInsight.meshRestPositions = node->mesh->positions;
+    meshInsight.triStrainStress.clear();
+    rendering::buildMeshEdgeFaceCounts(*node->mesh, meshInsight.edgeFaceCount);
+    meshInsight.valid = !meshInsight.triWeakness.empty();
+    if (physicsSimEnabled && meshInsight.valid) {
+        if (!massSpring.build(*node->mesh, meshInsight.triScenarioSource, springParams, meshInsight.meshUnitToMm,
+                              constraintsEnabled))
+            commandLog += "[model2] Mass-spring rebuild failed after deterministic refresh.\n";
+    }
+}
+
+static bool sameMaterial(const sim::SimMaterial& a, const sim::SimMaterial& b) {
+    return a.youngsModulusPa == b.youngsModulusPa && a.densityKgM3 == b.densityKgM3 && a.maxStrain == b.maxStrain;
+}
+
+static float maxTriScalar01(const std::vector<float>& v) {
+    float m = 0.f;
+    for (float x : v) m = std::max(m, std::clamp(x, 0.f, 1.f));
+    return m;
+}
 
 static uint64_t edgeKeyUndirected(uint32_t a, uint32_t b) {
     if (a > b) std::swap(a, b);
@@ -370,15 +451,17 @@ void applyPerTriangleWeaknessPackToVertices(geometry::Mesh& mesh, const std::vec
     }
 }
 
-void refreshWeaknessVisualization(geometry::Mesh& mesh, InsightCache& insight, float scenarioSpeed01,
-                                  float scenarioAccel01, float scenarioCorner01) {
+void refreshWeaknessVisualization(geometry::Mesh& mesh, InsightCache& insight,
+                                  const sim::SimulationScenario& scenario) {
     if (!insight.valid || insight.triScenarioSource.empty()) return;
     std::vector<analysis::TriangleWeakness> tri = insight.triScenarioSource;
     const size_t triCount = mesh.indices.size() / 3;
     if (insight.triStrainStress.size() >= triCount) {
         for (size_t t = 0; t < triCount && t < tri.size(); ++t) tri[t].strainStress = insight.triStrainStress[t];
     }
-    analysis::applyKinematicWeaknessProxies(tri, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+    float sp = 0.f, ap = 0.f, cr = 0.f;
+    sim::scenarioToVisualizationSliders(scenario, sp, ap, cr);
+    analysis::applyKinematicWeaknessProxies(tri, sp, ap, cr);
     insight.triPropagated.resize(insight.triWeakness.size());
     for (size_t t = 0; t < insight.triPropagated.size(); ++t)
         insight.triPropagated[t] =
@@ -553,18 +636,35 @@ int Application::run(int argc, char** argv) {
     static float weaknessLoadScale = 1.f;
     static float weaknessTimeMix = 0.f;
     static float weaknessVisualMode = 0.f;
-    static float scenarioSpeed01 = 0.f;
-    static float scenarioAccel01 = 0.f;
-    static float scenarioCorner01 = 0.f;
+    static bool vizDynamicNormalization = true;
+    static int vizSmoothPasses = 2;
+    static float vizSmoothLambda = 0.5f;
+    static bool vizStrainAlert = true;
+    static float vizStrainThreshold = 0.7f;
+    static bool vizStrainBlink = false;
+    static float vizDirectionWeight = 0.35f;
+    static float deformExaggeration = 8.f;
+    static char analysisModelBuf[160] = "llama3.1:8b";
+    static char objectiveJsonBuf[1536] =
+        "{\"objective\":\"minimize_max_strain\",\"constraints\":{\"max_uniform_scale_ratio\":1.06,"
+        "\"notes\":\"Small translate/scale steps only; engine validates.\"}}";
+    static int model2Iterations = 3;
+    static int model2MaxCommandsPerIter = 2;
+    static float model2MinConfidence = 0.5f;
+    static bool model2OptimizerRag = true;
+    static sim::SimulationScenario simScenario{};
+    static int scenarioTypeUi = 0;
+    static int materialPresetUi = 0;
     static bool physicsSimEnabled = false;
     static bool physicsWasEnabledLastFrame = false;
-    static bool fixBoundarySpring = true;
-    static bool fixBoundarySpringPrev = true;
+    static bool constraintsEnabled = true;
+    static bool constraintsEnabledPrev = true;
     static sim::MassSpringSystem massSpring;
     static sim::MassSpringParams springParams{};
-    static float scenarioSpeedPrev = -1.f;
-    static float scenarioAccelPrev = -1.f;
-    static float scenarioCornerPrev = -1.f;
+    static double simScenarioTime = 0.0;
+    static sim::SimulationScenario scenarioVizPrev{
+        sim::ScenarioType::Highway, -1.f, -1.f, -1.f}; // sentinel; first frame refreshes viz
+    static sim::SimMaterial springMaterialPrev = kSimMaterialPresets[0];
     static float springStiffnessPrev = -1.f;
     static float analysisMaterialDensityKgM3 = 7850.f;
     static bool enableMeshInsight = true;
@@ -576,6 +676,7 @@ int Application::run(int argc, char** argv) {
 
     ai::AIOrchestrator orchestrator;
     analysis::DefectDetector defectDetector;
+    defectDetector.setAnalysisModelName(analysisModelBuf);
     rendering::Camera camera;
     camera.setAspect(static_cast<float>(w) / static_cast<float>(h));
 
@@ -587,7 +688,7 @@ int Application::run(int argc, char** argv) {
         "{\"action\":\"create\",\"operations\":[],\"parameters\":{\"primitive\":\"cube\",\"id\":\"demo\"}}";
 
     std::string uploadErr;
-    vk.uploadMesh(*scene.find("demo")->mesh, uploadErr);
+    vk.uploadMesh(*scene.find("demo")->mesh, uploadErr, nullptr);
 
     double lx = 0, ly = 0;
     glfwGetCursorPos(window, &lx, &ly);
@@ -603,13 +704,15 @@ int Application::run(int argc, char** argv) {
 
         if (auto* pNode = scene.find(scene.activeModelId());
             pNode && pNode->mesh && meshInsight.valid && physicsSimEnabled && massSpring.valid()) {
+            simScenarioTime += static_cast<double>(phyDt);
             massSpring.setParams(springParams);
-            massSpring.setExternalLoads01(scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+            massSpring.setExternalAcceleration(
+                sim::scenarioAccelerationSolver(simScenario, simScenarioTime, meshUnitToMm_));
             massSpring.step(phyDt);
             massSpring.applyPositionsToMesh(*pNode->mesh);
             pNode->mesh->recomputeNormals();
             massSpring.computeTriangleStrainStress01(*pNode->mesh, meshInsight.triStrainStress);
-            refreshWeaknessVisualization(*pNode->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+            refreshWeaknessVisualization(*pNode->mesh, meshInsight, simScenario);
             meshDirty_ = true;
         } else if (physicsWasEnabledLastFrame && !physicsSimEnabled) {
             if (auto* n = scene.find(scene.activeModelId()); n && n->mesh) {
@@ -619,7 +722,7 @@ int Application::run(int argc, char** argv) {
                     n->mesh->positions = meshInsight.meshRestPositions;
                 n->mesh->recomputeNormals();
                 meshInsight.triStrainStress.clear();
-                refreshWeaknessVisualization(*n->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                refreshWeaknessVisualization(*n->mesh, meshInsight, simScenario);
                 meshDirty_ = true;
             }
         }
@@ -856,17 +959,133 @@ int Application::run(int argc, char** argv) {
                 meshInsight.triStrainStress.clear();
                 rendering::buildMeshEdgeFaceCounts(*node->mesh, meshInsight.edgeFaceCount);
                 meshInsight.valid = !meshInsight.triWeakness.empty();
-                scenarioSpeedPrev = scenarioSpeed01;
-                scenarioAccelPrev = scenarioAccel01;
-                scenarioCornerPrev = scenarioCorner01;
+                simScenarioTime = 0.0;
+                scenarioVizPrev = sim::SimulationScenario{sim::ScenarioType::Highway, -1.f, -1.f, -1.f};
                 springStiffnessPrev = springParams.baseStiffness;
-                fixBoundarySpringPrev = fixBoundarySpring;
+                constraintsEnabledPrev = constraintsEnabled;
+                springMaterialPrev = springParams.material;
                 massSpring.clear();
-                refreshWeaknessVisualization(*node->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                refreshWeaknessVisualization(*node->mesh, meshInsight, simScenario);
                 if (physicsSimEnabled &&
-                    !massSpring.build(*node->mesh, meshInsight.triScenarioSource, springParams, fixBoundarySpring))
+                    !massSpring.build(*node->mesh, meshInsight.triScenarioSource, springParams, meshInsight.meshUnitToMm,
+                                      constraintsEnabled))
                     commandLog_ += "[sim] Mass-spring build failed (empty or degenerate edges).\n";
                 meshDirty_ = true;
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Model 2 — design optimizer (commands only)");
+        ImGui::TextWrapped(
+            "Loop: pack engine metrics → Ollama (analysis model) → JSON proposals → validated PhysiSim commands → "
+            "apply → deterministic re-analysis. Engine stays authoritative; AI never overwrites physics numbers.");
+        ImGui::InputText("Analysis model (Ollama)##m2", analysisModelBuf, sizeof(analysisModelBuf));
+        if (ImGui::Button("Apply model name to detector##m2")) defectDetector.setAnalysisModelName(analysisModelBuf);
+        ImGui::InputTextMultiline("Objective JSON##m2", objectiveJsonBuf, sizeof(objectiveJsonBuf), ImVec2(-1, 72));
+        ImGui::SliderInt("Iterations##m2", &model2Iterations, 1, 5);
+        ImGui::SliderInt("Max commands / iteration##m2", &model2MaxCommandsPerIter, 1, 4);
+        ImGui::SliderFloat("Min confidence##m2", &model2MinConfidence, 0.f, 1.f, "%.2f");
+        ImGui::Checkbox("Inject RAG (analysis_memory)##m2", &model2OptimizerRag);
+        if (ImGui::Button("Run Model 2 optimizer loop##m2")) {
+            auto* node = scene.find(scene.activeModelId());
+            if (!node || !node->mesh)
+                commandLog_ += "[model2] No active mesh.\n";
+            else if (!meshInsight.valid)
+                commandLog_ += "[model2] Run analysis first (need triangle insight cache).\n";
+            else {
+                defectDetector.setAnalysisModelName(analysisModelBuf);
+                nlohmann::json lastMetricsAfter;
+                nlohmann::json lastPackSnapshot;
+                for (int iter = 0; iter < model2Iterations; ++iter) {
+                    node = scene.find(scene.activeModelId());
+                    if (!node || !node->mesh) break;
+                    const size_t tc = node->mesh->indices.size() / 3;
+                    std::vector<float> triStrain(tc, 0.f), triGeo(tc, 0.f);
+                    for (size_t t = 0; t < tc; ++t) {
+                        if (t < meshInsight.triStrainStress.size())
+                            triStrain[t] = meshInsight.triStrainStress[t];
+                        else if (t < meshInsight.triStress.size())
+                            triStrain[t] = meshInsight.triStress[t];
+                        if (t < meshInsight.triScenarioSource.size())
+                            triGeo[t] = meshInsight.triScenarioSource[t].geoWeakness;
+                    }
+                    const int mid = std::clamp(materialPresetUi, 0, kNumSimMaterialPresets - 1);
+                    nlohmann::json pack = analysis::buildModel2SimulationPack(
+                        *node->mesh, triStrain, triGeo, meshInsight.meshUnitToMm, kSimMaterialPackIds[mid],
+                        scenarioLabelString(simScenario.type), constraintsEnabled, 3.f);
+                    lastPackSnapshot = pack;
+
+                    std::string priorStr = "{}";
+                    if (!lastMetricsAfter.empty()) priorStr = lastMetricsAfter.dump();
+
+                    std::string rag;
+                    if (model2OptimizerRag) {
+                        analysis::AnalysisMemory mem("analysis_memory");
+                        rag = mem.retrieveContextForPrompt(analysis::fingerprintFromSimulationPack(pack), 3);
+                    }
+
+                    ai::AnalysisClientConfig cfg;
+                    cfg.host = "127.0.0.1";
+                    cfg.port = 11434;
+                    cfg.model = analysisModelBuf;
+                    ai::AnalysisClient m2(cfg);
+                    std::string raw, err;
+                    if (!m2.proposeEngineCommands(pack.dump(), std::string(objectiveJsonBuf), iter, priorStr,
+                                                  model2MaxCommandsPerIter + 2, model2MinConfidence * 0.75f, rag,
+                                                  raw, err)) {
+                        commandLog_ += "[model2] iter " + std::to_string(iter) + " " + err + "\n";
+                        break;
+                    }
+                    std::vector<ai::EngineCommandProposal> props;
+                    if (!ai::parseEngineProposals(raw, props, err)) {
+                        commandLog_ += "[model2] parse: " + err + "\n";
+                        break;
+                    }
+                    std::string filtLog;
+                    ai::filterValidateProposals(props, model2MinConfidence,
+                                                static_cast<size_t>(std::max(1, model2MaxCommandsPerIter)), filtLog);
+                    commandLog_ += "[model2] iter " + std::to_string(iter) + " " + filtLog;
+                    if (props.empty()) {
+                        commandLog_ += "[model2] No proposals passed filters; stopping.\n";
+                        break;
+                    }
+                    for (const auto& pr : props) {
+                        std::string cmdLine = pr.command.dump();
+                        std::string e;
+                        if (!commands.submitJson(cmdLine, e))
+                            commandLog_ += "[model2] apply failed: " + e + "\n";
+                        else
+                            commandLog_ += "[model2] applied: " + cmdLine + "\n";
+                    }
+                    refreshInsightDeterministic(scene, scene.activeModelId(), meshInsight, meshUnitToMm_,
+                                                analysisMaterialDensityKgM3, defectDetector, physicsSimEnabled,
+                                                massSpring, springParams, constraintsEnabled, commandLog_);
+                    node = scene.find(scene.activeModelId());
+                    if (node && node->mesh)
+                        refreshWeaknessVisualization(*node->mesh, meshInsight, simScenario);
+                    meshDirty_ = true;
+                    simScenarioTime = 0.0;
+                    lastMetricsAfter = nlohmann::json::object();
+                    std::vector<float> ts2(tc, 0.f);
+                    for (size_t t = 0; t < tc; ++t) {
+                        if (t < meshInsight.triStrainStress.size()) ts2[t] = meshInsight.triStrainStress[t];
+                        else if (t < meshInsight.triStress.size()) ts2[t] = meshInsight.triStress[t];
+                    }
+                    lastMetricsAfter["max_strain"] = maxTriScalar01(ts2);
+                    double sumS = 0.0;
+                    for (float x : ts2) sumS += static_cast<double>(x);
+                    lastMetricsAfter["avg_strain"] =
+                        tc ? static_cast<float>(sumS / static_cast<double>(tc)) : 0.f;
+                    lastMetricsAfter["iteration"] = iter;
+                }
+                if (analysisPersistCase_ && !lastPackSnapshot.empty()) {
+                    analysis::AnalysisMemory mem("analysis_memory");
+                    nlohmann::json snap;
+                    snap["optimizer"] = true;
+                    snap["last_metrics"] = lastMetricsAfter;
+                    mem.saveCase(scene.activeModelId() + "_model2",
+                                 analysis::fingerprintFromSimulationPack(lastPackSnapshot), snap);
+                }
+                commandLog_ += "[model2] Loop finished.\n";
             }
         }
         ImGui::Separator();
@@ -879,10 +1098,33 @@ int Application::run(int argc, char** argv) {
         ImGui::SliderFloat("Visual mode##w", &weaknessVisualMode, 0.f, 2.f, "%.0f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("0 = combined heat, 1 = RGB (geo / stress / load), 2 = multi-objective alignment");
-        ImGui::TextUnformatted("Kinematic scenario (what-if, 0–1)");
-        ImGui::SliderFloat("Speed##w", &scenarioSpeed01, 0.f, 1.f, "%.2f");
-        ImGui::SliderFloat("Accel / brake##w", &scenarioAccel01, 0.f, 1.f, "%.2f");
-        ImGui::SliderFloat("Cornering##w", &scenarioCorner01, 0.f, 1.f, "%.2f");
+        ImGui::Separator();
+        ImGui::TextUnformatted("Heatmap display (visualization only)");
+        if (ImGui::Checkbox("Dynamic min–max contrast##w", &vizDynamicNormalization)) meshDirty_ = true;
+        if (ImGui::SliderInt("Viz smooth passes##w", &vizSmoothPasses, 0, 4)) meshDirty_ = true;
+        if (ImGui::SliderFloat("Viz smooth blend##w", &vizSmoothLambda, 0.f, 1.f, "%.2f")) meshDirty_ = true;
+        if (ImGui::Checkbox("Strain alert (≥ threshold)##w", &vizStrainAlert)) meshDirty_ = true;
+        if (ImGui::SliderFloat("Alert threshold##w", &vizStrainThreshold, 0.3f, 0.95f, "%.2f")) meshDirty_ = true;
+        if (ImGui::Checkbox("Blink alert##w", &vizStrainBlink)) meshDirty_ = true;
+        if (ImGui::SliderFloat("Direction cue (displacement vs normal)##w", &vizDirectionWeight, 0.f, 1.f, "%.2f"))
+            meshDirty_ = true;
+        if (ImGui::SliderFloat("Deform exaggeration (×)##w", &deformExaggeration, 1.f, 25.f, "%.1f")) meshDirty_ = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Scales rendered shape from analysis rest; physics mesh is unchanged.");
+        ImGui::TextUnformatted("Simulation scenario (drives mass–spring loads + heatmap weights)");
+        ImGui::Combo("Material##sim", &materialPresetUi, "Mild steel\0Aluminum\0Rubber-like\0\0");
+        {
+            static int lastMaterialPresetUi = -1;
+            if (materialPresetUi != lastMaterialPresetUi) {
+                springParams.material = kSimMaterialPresets[std::clamp(materialPresetUi, 0, kNumSimMaterialPresets - 1)];
+                lastMaterialPresetUi = materialPresetUi;
+            }
+        }
+        ImGui::Combo("Scenario type##sim", &scenarioTypeUi, "Highway\0Braking\0Cornering\0Bump\0\0");
+        simScenario.type = static_cast<sim::ScenarioType>(std::clamp(scenarioTypeUi, 0, 3));
+        ImGui::SliderFloat("Speed (mph)##sim", &simScenario.speed_mph, 0.f, 120.f, "%.0f");
+        ImGui::SliderFloat("Intensity##sim", &simScenario.intensity, 0.f, 2.f, "%.2f");
+        ImGui::SliderFloat("Duration (s)##sim", &simScenario.duration_s, 0.2f, 30.f, "%.1f");
         ImGui::Separator();
         ImGui::TextUnformatted("Mass–spring preview (CPU, non-FEA)");
         if (ImGui::Checkbox("Enable mass–spring##w", &physicsSimEnabled)) {
@@ -891,24 +1133,42 @@ int Application::run(int argc, char** argv) {
                     if (meshInsight.meshRestPositions.size() == n->mesh->positions.size())
                         n->mesh->positions = meshInsight.meshRestPositions;
                     n->mesh->recomputeNormals();
-                    if (!massSpring.build(*n->mesh, meshInsight.triScenarioSource, springParams, fixBoundarySpring))
+                    if (!massSpring.build(*n->mesh, meshInsight.triScenarioSource, springParams, meshInsight.meshUnitToMm,
+                                          constraintsEnabled))
                         commandLog_ += "[sim] Mass-spring build failed.\n";
                     else
                         commandLog_ += "[sim] Mass-spring system built from mesh edges.\n";
-                    refreshWeaknessVisualization(*n->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                    simScenarioTime = 0.0;
+                    refreshWeaknessVisualization(*n->mesh, meshInsight, simScenario);
                     meshDirty_ = true;
                 }
             }
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Deforms the active mesh in CPU; strain drives the stress channel. Run analysis first.");
-        ImGui::Checkbox("Fix open-boundary vertices##w", &fixBoundarySpring);
+            ImGui::SetTooltip("Deforms the active mesh in CPU; strain/stress from springs drives the strain channel. "
+                              "Run analysis first.");
+        ImGui::Checkbox("Enable constraints (mount / boundary)##w", &constraintsEnabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pins open boundaries and heuristic mount points (partial Z on low-geo rim neighbors).");
         ImGui::SliderFloat("Spring stiffness##w", &springParams.baseStiffness, 5.f, 200.f, "%.0f");
         ImGui::SliderFloat("Damping##w", &springParams.damping, 0.f, 15.f, "%.1f");
         ImGui::SliderInt("Substeps / frame##w", &springParams.substepsPerFrame, 1, 16);
-        ImGui::SliderFloat("Strain ref (→ stress 1)##w", &springParams.strainReference, 0.02f, 0.4f, "%.3f");
-        ImGui::SliderFloat("External force scale##w", &springParams.externalForceScale, 0.f, 40.f, "%.1f");
+        ImGui::SliderFloat("Max strain (normalize to 1)##w", &springParams.material.maxStrain, 0.005f, 0.5f, "%.3f");
         ImGui::SliderFloat("Max displacement (0=off)##w", &springParams.maxDisplacement, 0.f, 0.5f, "%.3f");
+        if (ImGui::Button("Reset simulation##w") && meshInsight.valid) {
+            if (auto* n = scene.find(scene.activeModelId()); n && n->mesh) {
+                simScenarioTime = 0.0;
+                if (massSpring.valid())
+                    massSpring.restoreRestGeometryToMesh(*n->mesh);
+                else if (meshInsight.meshRestPositions.size() == n->mesh->positions.size())
+                    n->mesh->positions = meshInsight.meshRestPositions;
+                n->mesh->recomputeNormals();
+                meshInsight.triStrainStress.clear();
+                refreshWeaknessVisualization(*n->mesh, meshInsight, simScenario);
+                meshDirty_ = true;
+                commandLog_ += "[sim] Simulation reset (rest pose, velocities cleared).\n";
+            }
+        }
         if (ImGui::Button("Reset mesh to analysis rest##w") && meshInsight.valid) {
             if (auto* n = scene.find(scene.activeModelId()); n && n->mesh) {
                 if (massSpring.valid())
@@ -917,7 +1177,8 @@ int Application::run(int argc, char** argv) {
                     n->mesh->positions = meshInsight.meshRestPositions;
                 n->mesh->recomputeNormals();
                 meshInsight.triStrainStress.clear();
-                refreshWeaknessVisualization(*n->mesh, meshInsight, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                simScenarioTime = 0.0;
+                refreshWeaknessVisualization(*n->mesh, meshInsight, simScenario);
                 meshDirty_ = true;
                 commandLog_ += "[sim] Mesh geometry reset to last analysis rest pose.\n";
             }
@@ -963,35 +1224,34 @@ int Application::run(int argc, char** argv) {
         ImGui::End();
 
         if (meshInsight.valid) {
-            bool geomChanged = std::abs(scenarioSpeed01 - scenarioSpeedPrev) > 1e-5f ||
-                               std::abs(scenarioAccel01 - scenarioAccelPrev) > 1e-5f ||
-                               std::abs(scenarioCorner01 - scenarioCornerPrev) > 1e-5f;
+            bool scenarioVizChanged = scenarioVizPrev.type != simScenario.type ||
+                                     std::abs(scenarioVizPrev.speed_mph - simScenario.speed_mph) > 1e-4f ||
+                                     std::abs(scenarioVizPrev.intensity - simScenario.intensity) > 1e-4f ||
+                                     std::abs(scenarioVizPrev.duration_s - simScenario.duration_s) > 1e-4f;
             bool springRebuild = (std::abs(springParams.baseStiffness - springStiffnessPrev) > 1e-4f) ||
-                                   (fixBoundarySpring != fixBoundarySpringPrev);
-            if (geomChanged) {
-                scenarioSpeedPrev = scenarioSpeed01;
-                scenarioAccelPrev = scenarioAccel01;
-                scenarioCornerPrev = scenarioCorner01;
-                if (auto* node = scene.find(scene.activeModelId()); node && node->mesh) {
-                    if (!physicsSimEnabled) {
-                        refreshWeaknessVisualization(*node->mesh, meshInsight, scenarioSpeed01, scenarioAccel01,
-                                                       scenarioCorner01);
-                        meshDirty_ = true;
-                    }
+                                 (constraintsEnabled != constraintsEnabledPrev) ||
+                                 !sameMaterial(springMaterialPrev, springParams.material);
+            if (scenarioVizChanged) {
+                scenarioVizPrev = simScenario;
+                if (auto* node = scene.find(scene.activeModelId()); node && node->mesh && !physicsSimEnabled) {
+                    refreshWeaknessVisualization(*node->mesh, meshInsight, simScenario);
+                    meshDirty_ = true;
                 }
             }
             if (springRebuild && physicsSimEnabled) {
                 springStiffnessPrev = springParams.baseStiffness;
-                fixBoundarySpringPrev = fixBoundarySpring;
+                constraintsEnabledPrev = constraintsEnabled;
+                springMaterialPrev = springParams.material;
                 if (auto* node = scene.find(scene.activeModelId()); node && node->mesh) {
                     if (meshInsight.meshRestPositions.size() == node->mesh->positions.size())
                         node->mesh->positions = meshInsight.meshRestPositions;
                     node->mesh->recomputeNormals();
-                    if (!massSpring.build(*node->mesh, meshInsight.triScenarioSource, springParams, fixBoundarySpring))
+                    if (!massSpring.build(*node->mesh, meshInsight.triScenarioSource, springParams,
+                                          meshInsight.meshUnitToMm, constraintsEnabled))
                         commandLog_ += "[sim] Mass-spring rebuild failed.\n";
                     meshInsight.triStrainStress.clear();
-                    refreshWeaknessVisualization(*node->mesh, meshInsight, scenarioSpeed01, scenarioAccel01,
-                                                 scenarioCorner01);
+                    simScenarioTime = 0.0;
+                    refreshWeaknessVisualization(*node->mesh, meshInsight, simScenario);
                     meshDirty_ = true;
                 }
             }
@@ -1069,7 +1329,9 @@ int Application::run(int argc, char** argv) {
                     glm::vec3 defectDir{};
                     if (meshInsight.valid && ht < meshInsight.triScenarioSource.size()) {
                         std::vector<analysis::TriangleWeakness> one = {meshInsight.triScenarioSource[ht]};
-                        analysis::applyKinematicWeaknessProxies(one, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                        float sp = 0.f, ap = 0.f, cr = 0.f;
+                        sim::scenarioToVisualizationSliders(simScenario, sp, ap, cr);
+                        analysis::applyKinematicWeaknessProxies(one, sp, ap, cr);
                         combDyn = analysis::TriangleWeakness::combined(one[0], weaknessStressScale,
                                                                        weaknessVelocityScale, weaknessLoadScale);
                         velW = one[0].velocityWeight;
@@ -1083,7 +1345,7 @@ int Application::run(int argc, char** argv) {
                     ImGui::Text("Face (triangle) ID: %u", ht);
                     ImGui::Separator();
                     ImGui::Text("Severity band (AI merge): %s", severityBandLabel(weak));
-                    ImGui::Text("Weighted combo (sliders + scenario): %.2f", static_cast<double>(combDyn));
+                    ImGui::Text("Weighted combo (scenario + scales): %.2f", static_cast<double>(combDyn));
                     ImGui::Text("Laplacian stress proxy: %.2f (0-1, geometry-only)", static_cast<double>(stress));
                     ImGui::Text("Velocity / load weights: %.2f / %.2f", static_cast<double>(velW),
                                 static_cast<double>(loadW));
@@ -1141,7 +1403,9 @@ int Application::run(int argc, char** argv) {
                 float vW = 0.f, lW = 0.f, pr = 0.f;
                 if (meshInsight.valid && selectedTriIndex < meshInsight.triScenarioSource.size()) {
                     std::vector<analysis::TriangleWeakness> one = {meshInsight.triScenarioSource[selectedTriIndex]};
-                    analysis::applyKinematicWeaknessProxies(one, scenarioSpeed01, scenarioAccel01, scenarioCorner01);
+                    float sp = 0.f, ap = 0.f, cr = 0.f;
+                    sim::scenarioToVisualizationSliders(simScenario, sp, ap, cr);
+                    analysis::applyKinematicWeaknessProxies(one, sp, ap, cr);
                     combD = analysis::TriangleWeakness::combined(one[0], weaknessStressScale, weaknessVelocityScale,
                                                                  weaknessLoadScale);
                     vW = one[0].velocityWeight;
@@ -1206,7 +1470,46 @@ int Application::run(int argc, char** argv) {
 
         if (meshDirty_) {
             auto* node = scene.find(scene.activeModelId());
-            if (node && node->mesh) vk.uploadMesh(*node->mesh, uploadErr);
+            if (node && node->mesh) {
+                geometry::Mesh& mesh = *node->mesh;
+                const std::vector<glm::vec3>* restPtr =
+                    (meshInsight.valid && meshInsight.meshRestPositions.size() == mesh.positions.size())
+                        ? &meshInsight.meshRestPositions
+                        : nullptr;
+                const bool needVizDeform =
+                    restPtr != nullptr && std::abs(deformExaggeration - 1.f) > 1e-4f;
+                const bool needVizSmooth = vizSmoothPasses > 0 && !mesh.defectHighlight.empty();
+
+                if (needVizDeform || needVizSmooth) {
+                    std::vector<glm::vec3> posBk = mesh.positions;
+                    std::vector<glm::vec3> nrmBk = mesh.normals;
+                    std::vector<glm::vec4> dhBk = mesh.defectHighlight;
+                    std::vector<float> wpBk = mesh.weaknessPropagated;
+
+                    mesh.defectHighlight = dhBk;
+                    mesh.weaknessPropagated = wpBk;
+                    if (needVizSmooth) {
+                        static std::vector<std::vector<uint32_t>> vizNeighbors;
+                        rendering::meshBuildVertexNeighbors(mesh, vizNeighbors);
+                        rendering::meshSmoothVertexVec4(vizNeighbors, vizSmoothPasses, vizSmoothLambda,
+                                                       mesh.defectHighlight);
+                        rendering::meshSmoothVertexScalars(vizNeighbors, vizSmoothPasses, vizSmoothLambda,
+                                                          mesh.weaknessPropagated);
+                    }
+                    if (needVizDeform) {
+                        const std::vector<glm::vec3>& rest = meshInsight.meshRestPositions;
+                        for (size_t i = 0; i < mesh.positions.size(); ++i)
+                            mesh.positions[i] = rest[i] + (posBk[i] - rest[i]) * deformExaggeration;
+                        mesh.recomputeNormals();
+                    }
+                    vk.uploadMesh(mesh, uploadErr, restPtr);
+                    mesh.positions = std::move(posBk);
+                    mesh.normals = std::move(nrmBk);
+                    mesh.defectHighlight = std::move(dhBk);
+                    mesh.weaknessPropagated = std::move(wpBk);
+                } else
+                    vk.uploadMesh(mesh, uploadErr, restPtr);
+            }
             meshDirty_ = false;
         }
 
@@ -1221,6 +1524,19 @@ int Application::run(int argc, char** argv) {
             dv.loadScale = weaknessLoadScale;
             dv.visualMode = weaknessVisualMode;
             dv.timeMix = weaknessTimeMix;
+            dv.dynamicNormalization = vizDynamicNormalization;
+            dv.strainAlert = vizStrainAlert;
+            dv.strainAlertThreshold = vizStrainThreshold;
+            dv.strainAlertBlink = vizStrainBlink;
+            dv.directionVizWeight = vizDirectionWeight;
+            dv.vizTimeSec = static_cast<float>(glfwGetTime());
+            if (vizDynamicNormalization && !node->mesh->defectHighlight.empty()) {
+                rendering::meshComputeMixedRange(*node->mesh, dv, weaknessTimeMix, dv.heatRangeMin,
+                                                   dv.heatRangeMax);
+            } else {
+                dv.heatRangeMin = 0.f;
+                dv.heatRangeMax = 1.f;
+            }
             vk.recordMeshPass(*node->mesh, model, camera, dv);
         }
         imgui.render(vk.commandBuffer());

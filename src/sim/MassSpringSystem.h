@@ -5,6 +5,8 @@
 
 #include <glm/vec3.hpp>
 
+#include "sim/SimMaterial.h"
+
 namespace physisim::geometry {
 struct Mesh;
 }
@@ -15,12 +17,15 @@ struct TriangleWeakness;
 
 namespace physisim::sim {
 
+struct Constraint;
+
 struct SimVertex {
     glm::vec3 position{};
     glm::vec3 velocity{};
     glm::vec3 force{};
     float mass{1.f};
-    bool fixed{false};
+    /// Per-axis velocity locks after integration (1 = locked). (1,1,1) = fixed to rest pose.
+    glm::vec3 lockedAxes{0.f};
 };
 
 struct EdgeSpring {
@@ -31,13 +36,10 @@ struct EdgeSpring {
 };
 
 struct MassSpringParams {
+    SimMaterial material{};
     float baseStiffness{80.f};
     float damping{2.5f};
-    /// Max displacement from rest position per vertex (0 = disabled).
     float maxDisplacement{0.f};
-    /// |L - L0| / L0 above this maps to stress 1.0 in triangle output.
-    float strainReference{0.12f};
-    float externalForceScale{12.f};
     int substepsPerFrame{4};
 };
 
@@ -47,42 +49,46 @@ class MassSpringSystem {
 public:
     void clear();
 
-    /// Builds springs from `mesh` and stiffness from `triWeakness` (same triangle order as mesh.indices/3).
-    /// Optionally pins vertices on open-boundary edges.
+    /// `meshUnitToMm`: mesh units to millimeters (typical STL mm → 1). Used for lumped mass from surface area.
+    /// When `enableConstraints` is true, open-boundary and heuristic mount constraints are applied.
     bool build(const geometry::Mesh& mesh, const std::vector<analysis::TriangleWeakness>& triWeakness,
-               const MassSpringParams& params, bool fixBoundaryVertices);
+               const MassSpringParams& params, float meshUnitToMm, bool enableConstraints,
+               const std::vector<Constraint>* extraConstraints = nullptr);
 
     bool valid() const { return !vertices_.empty() && !springs_.empty(); }
 
     void setParams(const MassSpringParams& p) { params_ = p; }
     const MassSpringParams& params() const { return params_; }
 
-    /// Global inertial / load cues (0–1), mapped to model-space +Z forward, −Y vertical, +X lateral.
-    void setExternalLoads01(float speed01, float accelLong01, float cornering01);
+    /// Effective body acceleration in model space (same convention as scenario solver: +Z forward, +X lateral, +Y up).
+    void setExternalAcceleration(const glm::vec3& accelerationModel);
 
     void step(float dt);
 
     void applyPositionsToMesh(geometry::Mesh& mesh) const;
 
-    /// Per-triangle max edge engineering strain magnitude, mapped to [0,1] using strainReference.
+    /// Per-triangle strain from edges: strain = |L-L0|/L0, stress = E*strain; viewport uses normalizedStress =
+    /// clamp(|strain|/material.maxStrain,0,1) per edge, then max over triangle.
     void computeTriangleStrainStress01(const geometry::Mesh& mesh, std::vector<float>& outPerTriangle) const;
 
     const std::vector<glm::vec3>& restPositions() const { return restPositions_; }
 
-    /// Copies rest positions into `mesh` and resets internal vertex state to match.
     void restoreRestGeometryToMesh(geometry::Mesh& mesh);
 
 private:
+    static bool isFullLock(const glm::vec3& lockedAxes) {
+        return lockedAxes.x > 0.5f && lockedAxes.y > 0.5f && lockedAxes.z > 0.5f;
+    }
+
     void accumulateSpringForces();
     void integrateExplicitEuler(float dt);
     void clampDisplacements();
-    static void collectBoundaryVertices(const geometry::Mesh& mesh, std::vector<uint8_t>& outPinned);
 
     std::vector<SimVertex> vertices_;
     std::vector<EdgeSpring> springs_;
     std::vector<glm::vec3> restPositions_;
     MassSpringParams params_{};
-    glm::vec3 externalAcceleration_{0.f};
+    glm::vec3 externalAccel_{0.f};
 };
 
 } // namespace physisim::sim

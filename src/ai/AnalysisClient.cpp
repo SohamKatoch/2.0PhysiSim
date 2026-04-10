@@ -1,5 +1,8 @@
 #include "ai/AnalysisClient.h"
 
+#include <algorithm>
+#include <sstream>
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
@@ -107,6 +110,70 @@ bool AnalysisClient::refineWithFeedback(const std::string& feedbackPayloadJson, 
             return true;
         }
         err = "Unexpected refinement response";
+        return false;
+    } catch (const std::exception& e) {
+        err = e.what();
+        return false;
+    }
+}
+
+bool AnalysisClient::proposeEngineCommands(const std::string& simulationPackJson, const std::string& objectiveJson,
+                                           int iterationIndex, const std::string& priorIterationSummaryJson,
+                                           int maxProposals, float minConfidence, const std::string& ragContext,
+                                           std::string& outRawJson, std::string& err) {
+    httplib::Client cli(cfg_.host.c_str(), cfg_.port);
+    cli.set_connection_timeout(3, 0);
+    cli.set_read_timeout(cfg_.timeoutSeconds, 0);
+
+    std::ostringstream prompt;
+    prompt << "You are Model 2 (design optimizer) for PhysiSim CAD. You receive SIMULATION_PACK_JSON: "
+              "deterministic summaries from the engine (strain proxies, hotspots, materials, scenario). "
+              "RULES: (1) Engine numbers are TRUTH — never replace or contradict them. (2) You do NOT run "
+              "physics. (3) You ONLY output executable PhysiSim commands the host can validate. (4) No prose "
+              "outside JSON.\n"
+              "ALLOWED command actions EXACTLY: create, modify, boolean, transform, analyze, analyze_fem. "
+              "The geometry engine currently implements: create (primitive cube), transform (translate array "
+              "[x,y,z] and/or uniform scale). Prefer conservative transform deltas (small translate/scale) as "
+              "stand-ins for design intent when other ops are unavailable. analyze/analyze_fem may be used to "
+              "request re-check after edits.\n"
+              "Output ONLY valid JSON with this shape:\n"
+              "{\"proposals\":[{\"confidence\":0.0-1.0,\"rationale\":\"short\",\"command\":{...}}],"
+              "\"disclaimer\":\"Proposals only; engine validates and applies.\"}\n"
+              "Include at most " << std::max(1, maxProposals)
+           << " proposals. Omit or lower confidence for uncertain items. Each confidence must be >= "
+           << minConfidence << " to be considered by the host (you may still include lower; host will drop).\n"
+              "OBJECTIVE_JSON:\n"
+           << objectiveJson << "\n"
+              "ITERATION_INDEX: " << iterationIndex << "\n"
+              "PRIOR_ITERATION_SUMMARY_JSON (metrics after last apply, may be empty object):\n"
+           << priorIterationSummaryJson << "\n";
+    if (!ragContext.empty()) {
+        prompt << "SIMILAR_PAST_CASES_JSON (RAG memory — patterns only, not authoritative):\n" << ragContext
+               << "\n";
+    }
+    prompt << "SIMULATION_PACK_JSON:\n" << simulationPackJson;
+
+    nlohmann::json body;
+    body["model"] = cfg_.model;
+    body["prompt"] = prompt.str();
+    body["stream"] = false;
+
+    auto res = cli.Post("/api/generate", body.dump(), "application/json");
+    if (!res) {
+        err = "HTTP error (model2 optimizer)";
+        return false;
+    }
+    if (res->status != 200) {
+        err = "Model2 optimizer HTTP " + std::to_string(res->status);
+        return false;
+    }
+    try {
+        auto j = nlohmann::json::parse(res->body);
+        if (j.contains("response") && j["response"].is_string()) {
+            outRawJson = j["response"].get<std::string>();
+            return true;
+        }
+        err = "Unexpected model2 optimizer response";
         return false;
     } catch (const std::exception& e) {
         err = e.what();

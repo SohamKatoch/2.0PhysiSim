@@ -45,10 +45,10 @@ VkPipeline createMeshGraphicsPipeline(VkDevice device, VkPipelineLayout layout, 
 
     VkVertexInputBindingDescription bind{};
     bind.binding = 0;
-    bind.stride = 52;
+    bind.stride = 64;
     bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[5]{};
+    VkVertexInputAttributeDescription attrs[6]{};
     attrs[0].binding = 0;
     attrs[0].location = 0;
     attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -69,12 +69,16 @@ VkPipeline createMeshGraphicsPipeline(VkDevice device, VkPipelineLayout layout, 
     attrs[4].location = 4;
     attrs[4].format = VK_FORMAT_R32_SFLOAT;
     attrs[4].offset = 48;
+    attrs[5].binding = 0;
+    attrs[5].location = 5;
+    attrs[5].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrs[5].offset = 52;
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &bind;
-    vi.vertexAttributeDescriptionCount = 5;
+    vi.vertexAttributeDescriptionCount = 6;
     vi.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
