@@ -1,3 +1,4 @@
+
 PhysiSim CAD 2.0
 A desktop CAD prototype with a Vulkan viewport, AI-assisted geometry commands, and real-time mesh analysis. Load an STL, run structural analysis, and get per-triangle defect highlighting — all driven by a JSON command system that two AI roles (design and analysis) can talk to via Ollama.
 
